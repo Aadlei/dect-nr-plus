@@ -1,0 +1,997 @@
+mfw-nr+_nrf91x1 release notes
+-----------------------------
+
+** Introduction to the mfw-nr+_nrf91x1 release notes **
+
+These release notes describe the changes in the mfw-nr+_nrf91x1 firmware from version to version.
+The release notes are intended to briefly list all relevant changes in each version.
+
+Copyright (c) Nordic Semiconductor ASA. All rights reserved.
+
+
+*** mfw-nr+_nrf91x1_1.1.0
+**********************************
+
+The mfw-nr+_nrf91x1 is the DECT NR+ firmware for modem subsystem of nRF9131 LACA A0, nRF9151
+LACA A0, nRF9151 LACA A1 and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New Radio (NR)
+technical specifications version 1.5.1.
+
+DECT NR+ operation is enabled on frequency bands 1, 2, 4, 9, and 22.
+
+DECT NR+ band 4 is supported by the nRF9151-LACA-A0 and nRF9151-LACA-A1.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.2 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+- Added support for adding and removing scheduled operations, enabling a 1-slot turnaround time for
+  PHY operations in low-latency modes.
+- Enhanced support for various radio modes to improve power consumption across different use cases.
+- Added reporting of turnaround times for different radio modes.
+- Introduced support for DECT NR+ band 4, available on the nRF9151 LACA A0 and nRF9151 LACA A1.
+- Add support for 21 dBm output power on bands B1, B2, B9, and B22, available on the nRF9151 LACA A0 and A1.
+  Note: Output power on Band 4 is limited to 19 dBm.
+- Included battery voltage values in PHY operation callbacks.
+- Added operation handle values for all PCC and PDC reception callbacks, simplifying packet
+  identification for RX operations.
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+-
+
+*** Limitations
+***************
+- Delta FOTA is not supported from previous mfw-nr+_nrf91x1_1.0.x releases
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.1.0.ihex
+292fa9387e8a2fafe6375b54a6211b3f (MD5)
+
+firmware.update.image.digest.txt
+40f2e24536f72409035b22c5e9574aad (MD5)
+
+firmware.update.image.segments.0.hex
+b0158d649743ab81bdec82443d7d8be2 (MD5)
+
+firmware.update.image.segments.1.hex
+1f6ddc5691cedb50139b637d29934e22 (MD5)
+
+ipc-dfu_nrf91x1_2.1.0.ihex
+292fa9387e8a2fafe6375b54a6211b3f (MD5)
+
+mfw-nr+_nrf91x1_1.1.0.cbor
+e0c0ead98df2824cab54c35f8e97e9cf (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.1.0-FOTA-TEST_to_1.1.0.bin
+9bd3fbe29534b34bcb2b099123cb0416 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.1.0_to_1.1.0-FOTA-TEST.bin
+ff3933b307defc11afdbbe8b54acd864 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.2
+*************************
+
+The mfw-nr+_nrf91x1 is the DECT NR+ firmware for modem subsystem of nRF9131 LACA A0, nRF9151
+LACA A0, and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New Radio (NR)
+technical specifications version 1.5.1.
+
+DECT NR+ operation is enabled on frequency bands 1, 2, 4, 9, and 22.
+
+DECT NR+ band 4 is supported by the nRF9151 LACA A0.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.1 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+- Added support for DECT NR+ band 4. Note: DECT NR+ band 4 is supported by the nRF9151 LACA A0.
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Enhanced detection and compensation mechanisms for RF Direct Current (DC) offset.
+- Resolved an issue with incorrect symbol count in the Received Signal Strength Indicator (RSSI)
+  measurement report.
+- Addressed a rare instability that occurred when two simultaneous RF stop operations (timed and
+  immediate) collided.
+
+*** Limitations
+***************
+- Power consumption has not been fully optimized.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+066568215ac2463b717a403d28c4acf5 (MD5)
+
+firmware.update.image.digest.txt
+2cdce73931bae550b586b1a17c48bf0f (MD5)
+
+firmware.update.image.segments.0.hex
+5b8edecbc4559bbc6808f5fbe32c1534 (MD5)
+
+firmware.update.image.segments.1.hex
+f5346d1928343114b8cbe8eff552a20a (MD5)
+
+ipc-dfu_nrf91x1_2.0.0.ihex
+066568215ac2463b717a403d28c4acf5 (MD5)
+
+mfw-nr+_nrf91x1_1.0.2.cbor
+cb9ee2a660652c905105681864573c50 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.1_to_1.0.2.bin
+113086f50ed0b701f358b6acc24867da (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.2-FOTA-TEST_to_1.0.2.bin
+fd3d896d8c8b69423493c31c582462af (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.2_to_1.0.2-FOTA-TEST.bin
+9c334c48c0271033b72a0a9f746c2ef3 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.1
+*************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for modem subsystem of nRF9131 LACA
+A0, nRF9151 LACA A0, and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New
+Radio (NR) technical specifications version 1.5.1.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency bands 1, 2, 9 and 22.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.1 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+- Updated physical layer firmware latencies, affecting values reported in the libmodem API
+  nrf_modem_dect_phy_latency.
+- Improved RX AGC loop for better gain control accuracy, enhancing RSSI-1 measurement accuracy.
+- Improved AGC performance to mitigate adjacent channel interference.
+- Performance improvements for decoding at low signal-to-noise ratios.
+- Updated the sequence for indicating and tracing PHY coredump, allowing the application to capture
+  PHY coredumps within the fault handler.
+
+*** Bug fixes
+*************
+- Addressed a possible memory leak issue in combined TX and RX operations that occurred when the
+  operation was scheduled but the start time expired before the actual start.
+- Fixed the status return value during de-initialization when the temperature exceeds the maximum
+  supported value.
+- Fixed an issue with RX stopping during de-initialization if combined TX and RX operation was used.
+  Previously, RX operation was not stopped if de-initialization was performed during TX operation.
+- Adjusted the timing of as-soon-as-possible TX operations to prevent late starts.
+- Made minor corrections and improvements to RSSI reports generated by the physical layer firmware.
+- Resolved excessive current consumption after de-initializing the physical layer firmware.
+- Resolved excessive current consumption with nRF9151 after TX RF off.
+
+*** Limitations
+***************
+- Power consumption has not been fully optimized.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+1c99f130ace12b98f2dc867cfef3ea59 (MD5)
+
+firmware.update.image.digest.txt
+14e1fdbf83df0e45cc7ee1c3c202444c (MD5)
+
+firmware.update.image.segments.0.hex
+acd0ad7d04bb489210a607a6d4bf2ccc (MD5)
+
+firmware.update.image.segments.1.hex
+dc4a7e6a9d4119e87e7d23d5ba3dc253 (MD5)
+
+ipc-dfu_nrf91x1_2.0.0.ihex
+1c99f130ace12b98f2dc867cfef3ea59 (MD5)
+
+mfw-nr+_nrf91x1_1.0.1.cbor
+bf51591f4818eb65b0231c8b441bbf6e (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0_to_1.0.1.bin
+f5de45c8ed3de312ef20c653453dc789 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.1-FOTA-TEST_to_1.0.1.bin
+4322a27fe4003621aafa52608666c14b (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.1_to_1.0.1-FOTA-TEST.bin
+e105fd2e33a05562ae90dd610a76a12e (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0
+*************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for modem subsystem of nRF9131 LACA
+A0, nRF9151 LACA A0, and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New
+Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency bands 1, 2, 9 and 22.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.0 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+-
+
+*** Limitations
+***************
+- Power consumption has not been fully optimized.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+002a6c08223c09dadbf1153214045056 (MD5)
+
+firmware.update.image.digest.txt
+050db74a8d2fa19079758e58a0d3c657 (MD5)
+
+firmware.update.image.segments.0.hex
+cce6e59a9fb8dc7d2cdb88cdbd2ab367 (MD5)
+
+firmware.update.image.segments.1.hex
+46672925275375317842009b87cece98 (MD5)
+
+ipc-dfu_nrf91x1_2.0.0.ihex
+002a6c08223c09dadbf1153214045056 (MD5)
+
+mfw-nr+_nrf91x1_1.0.0.cbor
+2af32a7ca2ab57a7fe0a0426cea7a3c9 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-FOTA-TEST_to_1.0.0.bin
+208f087b89f99ebe9229ebb3e50fd6ae (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0_to_1.0.0-FOTA-TEST.bin
+b15ecae09522d225c4233eda4e33e76d (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-65.rc
+*******************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for modem subsystem of nRF9131 LACA
+A0, nRF9151 LACA A0, and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New
+Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.0 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Implemented a fix to address the handling of the "harq_rx_expiry_time_us" parameter. Previously,
+  when a zero value was configured, it was automatically adjusted to 15ms.
+- Security update for CVE-2024-27979.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+f01a10c30c74af6c571d6c29b29e6f87 (MD5)
+
+firmware.update.image.cbor
+069576bb6e9d4f209b4900ebbdd8ac01 (MD5)
+
+firmware.update.image.digest.txt
+562ebd860c51118bdaef46924ede5dee (MD5)
+
+firmware.update.image.segments.0.hex
+a7a78d466e32d0180d0acf52c606cbab (MD5)
+
+firmware.update.image.segments.1.hex
+7bd3c08be58add740411d80b187f9ecd (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-56.rc_to_mfw-nr+_nrf91x1_1.0.0-65.rc.bin
+5222ac3be795783601a229282ab9e97b (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-65.rc-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-65.rc.bin
+161ec545df473acf9ef23acd9faa1350 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-65.rc_to_mfw-nr+_nrf91x1_1.0.0-65.rc-FOTA-TEST.bin
+8995e026c1a40c74b8ed3e29c2ae3865 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-56.rc
+*******************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for modem subsystem of nRF9131 LACA
+A0, nRF9151 LACA A0, and nRF9161 LACA A0 SiP modules. It supports Release 1 of the DECT-2020 New
+Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is advisable to use the latest versions of the nRF Connect and nRF Connect Programmer tools.
+
+This release aligns with v1.0 of the nRF91x1 DECT NR+ AT Commands Reference Guide.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Fixed TX power class in physical layer capability to report correct value of 3. Earlier the
+  invalid reported value was 2.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+21746FD.ipc_dfu.signed_2.0.0.ihex
+178b160619be09c9be9e55ec667ddeb0 (MD5)
+
+firmware.update.image.digest.txt
+0513dfa27329c7db736d5c190a9d6a33 (MD5)
+
+firmware.update.image.segments.0.hex
+c92c86fe5701e7f0a0eb0f9a40276fe1 (MD5)
+
+firmware.update.image.segments.1.hex
+444f7a0c7aac351fd9ed5159a92ac174 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-53.rc
+*******************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Resolved modem instability in case if next PCC is received while previous PDC decoding result is
+  still being processed.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+5181dace7da101504e4fa9ddd63476fe (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-46.prealpha_to_mfw-nr+_nrf91x1_1.0.0-53.rc.bin
+79555ef64693de63d8e0e139c778bfec (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-53.rc-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-53.rc.bin
+90c511bfb6823762c4640ec983f1e4c0 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-53.rc_to_mfw-nr+_nrf91x1_1.0.0-53.rc-FOTA-TEST.bin
+a89af23a7a8a660467fa7072a0ad41a0 (MD5)
+
+firmware.update.image.cbor
+4ba2d02a587170321db5e73b8412307c (MD5)
+
+firmware.update.image.digest.txt
+ec3892f7248e9026ad2d2c9de5c6c834 (MD5)
+
+firmware.update.image.segments.0.hex
+fcc44e3e3853c5df72caa191cef4ed0a (MD5)
+
+firmware.update.image.segments.1.hex
+2169084d55d7e9ffb439c84699b72b0c (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-46.prealpha
+*************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+- Improved MCS3 and MCS4 performance in dispersive channel conditions.
+- Updated physical layer latencies that affects values in libmodem API "nrf_modem_dect_phy_latency".
+
+*** Bug fixes
+*************
+- Resolved modem instability when accessing services requiring PHY time before initializing the DECT
+  PHY client.
+- Resolved modem instability during combined RX and TX operations when the scheduled TX operation is
+  delayed.
+- Fixed an issue where the last RSSI-1 measurement report is not sent to the MAC in case of PDC
+  reception being aborted in the middle of the operation.
+- Fixed a rare problem with the RSSI-1 report containing a "not measured" symbol value instead of a
+  useful measurement result.
+- Fix for TX transmission EVM when the previous RX reception was received with high gain values.
+- Improved RSSI-2 measurement accuracy.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+057b046dcb9e7d221f99f98f793b858f (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-28.prealpha_to_mfw-nr+_nrf91x1_1.0.0-46.prealpha.bin
+b35a497cd254ce917337876275765de0 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-46.prealpha-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-46.prealpha.bin
+3d9ec4a0907d021554dec33e3502bdc2 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-46.prealpha_to_mfw-nr+_nrf91x1_1.0.0-46.prealpha-FOTA-TEST.bin
+6f9fa19f9d3f5dc6a56050cf4923ee75 (MD5)
+
+firmware.update.image.cbor
+f07092d0632031ca5e426be05a285503 (MD5)
+
+firmware.update.image.digest.txt
+807fdd859f7afdebc48a5a7d77cde7f8 (MD5)
+
+firmware.update.image.segments.0.hex
+0fe83d83ef3f3af8a6057c3b7fbece26 (MD5)
+
+firmware.update.image.segments.1.hex
+3314711c229a82344f29457a7d2206b5 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-28.prealpha
+*************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Fix for RSSI-1 measurement. In some specific RX durations, some RSSI symbols were set incorretly
+  as not measured.
+- Fix for physical layer packet reception control. This bug may have caused physical layer to become
+  unstable and radio operations to stop suddenly.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+23075f8ce4a49518a702b05575fcb627 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-22.prealpha_to_mfw-nr+_nrf91x1_1.0.0-28.prealpha.bin
+8225415fe240e417f8673e3ef81fbaec (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-28.prealpha-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-28.prealpha.bin
+5afa89b21776a7813d274eca3d1a0b16 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-28.prealpha_to_mfw-nr+_nrf91x1_1.0.0-28.prealpha-FOTA-TEST.bin
+4a121d9bc36091724f127d3ad2d11079 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-4.prealpha_to_mfw-nr+_nrf91x1_1.0.0-28.prealpha.bin
+94c1496243707536f204c8f3c16d51b1 (MD5)
+
+firmware.update.image.cbor
+d5b71d5cb61f0c3d7a2d97b35d841801 (MD5)
+
+firmware.update.image.digest.txt
+1f0cb2266ad579927eabf9ed6135ae8b (MD5)
+
+firmware.update.image.segments.0.hex
+e477fcdee39b8046267e0444abe9c5a6 (MD5)
+
+firmware.update.image.segments.1.hex
+a485955e25b59c3ff25cb3c9b7f043b8 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-22.prealpha
+*************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+- Adjusted the order of messaging to delay the last RSSI report until after receiving fast HARQ TX.
+
+*** Bug fixes
+*************
+- Enhanced channel estimation and 16QAM demodulation performance to withstand dispersive channel
+  conditions.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+421f5de7732a558e3e314c0c0aeea96e (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-22.prealpha-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-22.prealpha.bin
+5ab50366f49e2ff95cbe509f125acd34 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-22.prealpha_to_mfw-nr+_nrf91x1_1.0.0-22.prealpha-FOTA-TEST.bin
+dd7581490eb6f94dfeed0b9f6da56c55 (MD5)
+
+delta_update_mfw-nr+_nrf91x1_1.0.0-4.prealpha_to_mfw-nr+_nrf91x1_1.0.0-22.prealpha.bin
+9710f518c65e49faac356300e8cf0bdf (MD5)
+
+firmware.update.image.cbor
+45888cda5e8cb48d9bbdb6a7a42a6bcf (MD5)
+
+firmware.update.image.digest.txt
+138ccca6b7f8ecf39b8e1f6a417a5b8e (MD5)
+
+firmware.update.image.segments.0.hex
+92a25cf30ce1988edc771badbdd20ccb (MD5)
+
+firmware.update.image.segments.1.hex
+fae98575949c1afa84727af81f9c64b5 (MD5)
+
+
+*** mfw-nr+_nrf91x1_1.0.0-4.prealpha
+************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2, 9 and 22.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+- Added support for frequency band 22.
+- Implemented support for combined RX and TX operations.
+
+*** Changes
+***********
+- Enhanced TX filtering to mitigate adjacent channel interference.
+- Removed deep sleep-related latency values and updated latency timings.
+- Enhancements on RSSI-1 scan accuracy.
+
+*** Bug fixes
+*************
+- Fixed an issue with redundant RSSI reports. Under certain PHY operation timings, an extra and
+  unnecessary RSSI report was possible.
+- Resolved an issue with the TX HARQ process count. Without the fix, the number of TX HARQ processes
+  remained constantly at 2.
+
+*** Limitations
+***************
+- This release version is intended for R&D and test purposes only, and should not be used in
+  products or for deriving products from this firmware.
+- Performance, such as firmware operation in dispersive radio signal conditions, has not been
+  optimized.
+- Dynamic sleep mode is not supported, affecting overall power management.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+839559945a6220f5cdefeb4794d8dece (MD5)
+
+firmware.update.image.cbor
+9434052bdc58c8075ab98e8f5c0c4924 (MD5)
+
+firmware.update.image.digest.txt
+7fedc20294b032be89f44daa2f0a2356 (MD5)
+
+firmware.update.image.segments.0.hex
+30f06c29e2c830be7ce8b40873ba5fdc (MD5)
+
+firmware.update.image.segments.1.hex
+5fe2dbeaf13ac0730a5799ecbc2bacd9 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-4.prealpha-FOTA-TEST_to_mfw-nr+_nrf91x1_1.0.0-4.prealpha.bin
+091a148d2635d0029d397ca6e94d4aa9 (MD5)
+
+mfw-nr+_nrf91x1_update_from_1.0.0-4.prealpha_to_mfw-nr+_nrf91x1_1.0.0-4.prealpha-FOTA-TESt.bin
+ed45bd30c0ddff386dfd9194ab29d0ca (MD5)
+
+
+*** mfw-nr+_nrf91x1_0.5.0-110.prealpha
+**************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2 and 9.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+- Suport for HARQ configurations and HARQ reset functionality.
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+- Improved the handling of the PHY error recovery sequence. Occasionally, the error recovery process
+  was unsuccessful, potentially leading to modem hang-ups.
+
+*** Limitations
+***************
+- Use of this release version is for R&D and test purposes only, and may not be used in products
+  or deriving products from this firmware.
+- Support of HARQ timings are not optimized.
+- Power consumption has not been optimized.
+- There are L1 operation latency restrictions as reported by the modem.
+- Performance, for example firmware operation in weak radio signal conditions or condition with
+  control or data channel retransmissions, has not been optimized.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+d51b6bff73ad8cf8ff8ecdb0b3bfe1d2 (MD5)
+
+firmware.update.image.cbor
+fdf8833f0f1cc387437f1960c333825c (MD5)
+
+firmware.update.image.digest.txt
+b907194f28ce94fd00d58b5a7c6f0b0b (MD5)
+
+firmware.update.image.segments.0.hex
+338c878f50205ac21d71e0b832a67976 (MD5)
+
+firmware.update.image.segments.1.hex
+c7f0401e1d7f1d74a1bc8bd5c4a29917 (MD5)
+
+mfw-nr+_nrf91x1_update_from_0.5.0-110.prealpha-FOTA-TEST_to_mfw-nr+_nrf91x1_0.5.0-110.prealpha.bin
+5e98be20e54e68fb6ed1a5e151d6cfe6 (MD5)
+
+mfw-nr+_nrf91x1_update_from_0.5.0-110.prealpha_to_mfw-nr+_nrf91x1_0.5.0-110.prealpha-FOTA-TEST.bin
+e416ee42909f8a42c892b1b0a61749f9 (MD5)
+
+mfw-nr+_nrf91x1_update_from_0.5.0-91.prealpha_to_mfw-nr+_nrf91x1_0.5.0-110.prealpha.bin
+357fbe761f5ba0511040ce0aaabd4341 (MD5)
+
+
+*** mfw-nr+_nrf91x1_0.5.0-105.prealpha
+**************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2 and 9.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+-
+
+*** Changes
+***********
+- Combined low and high fast agc windows to one larger window.
+
+*** Bug fixes
+*************
+- Fixed occasional modem instability that may have occur when RSSI-1 measurements were performed
+  during RX reception.
+- Fix for an Rx operation failure when Rx operations were timed, and time was set too closely for
+  consecutive operations. Rx operation was silently cancelled by PHY.
+- Fix for rare and random modem instability during operation stop. This may have looked like modem
+  hang and application watchdog may have triggered.
+
+*** Limitations
+***************
+- Use of this release version is for R&D and test purposes only, and may not be used in products
+  or deriving products from this firmware.
+- Support of HARQ is limited.
+- Power consumption has not been optimized.
+- There are L1 operation latency restrictions as reported by the modem.
+- Performance, for example firmware operation in weak radio signal conditions or condition with
+  control or data channel retransmissions, has not been optimized.
+
+*** Known Issues
+****************
+-
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+65b1a41f28614c75ce963da76a0a83dc (MD5)
+
+firmware.update.image.cbor
+f15e5a15170c5871cc6a44884235f231 (MD5)
+
+firmware.update.image.digest.txt
+49dadb864cadb56f5821ed7f28ef679b (MD5)
+
+firmware.update.image.segments.0.hex
+ff87e19158c451d3a2d4d2c464cbf123 (MD5)
+
+firmware.update.image.segments.1.hex
+0451092c072c6942a130ac24745e3663 (MD5)
+
+
+*** mfw-nr+_nrf91x1_0.5.0-91.prealpha
+*************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2 and 9.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 and nRF9131 LACA A0 SiP versions.
+
+*** New functionality
+*********************
+- AT%XPRODDONE to enable modem firmware downgrade prevention.
+- Synchronization Training Field (STF) signal cover sequence. ETSI TS 103 636-3 V1.4.3.
+- Updated RSSI-1 API. Framed time-based scheduling removed and MAC can control start time alignment.
+  with the frame border. Longer than 10ms measurements supported with 5ms and 10ms report intervals.
+
+*** Changes
+***********
+-
+
+*** Bug fixes
+*************
+-
+
+*** Limitations
+***************
+- Use of this release version is for R&D and test purposes only, and may not be used in products
+  or deriving products from this firmware.
+- Support of HARQ is limited.
+- Power consumption has not been optimized.
+- There are L1 operation latency restrictions as reported by the modem.
+- Performance, for example firmware operation in weak radio signal conditions or condition with
+  control or data channel retransmissions, has not been optimized.
+
+*** Known Issues
+****************
+- Occasional modem instability when RSSI-1 measurements are performed during RX reception.
+- Occasionally Rx operations may fail if Rx operations are timed, and time is set too closely for
+  consecutive operations. Rx operation is silently cancelled by PHY.
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+0af88a4db7378206543d4dbff04ecc51 (MD5)
+
+firmware.update.image.cbor
+b51527a2c00b4cf093a6071a3e98d362 (MD5)
+
+firmware.update.image.digest.txt
+c771f3dea4958b1498d81ecc25b375b8 (MD5)
+
+firmware.update.image.segments.0.hex
+2036f79b873d25f76ba3453cbd9931d2 (MD5)
+
+firmware.update.image.segments.1.hex
+fed1e55eb5e2fed2b2b4536c23cadd36 (MD5)
+
+
+*** mfw-nr+_nrf91x1_0.5.0-74.prealpha
+*************************************
+
+The mfw-nr+_nrf91x1 is the DECT-2020 New Radio (NR) firmware for the modem subsystem of nRF9161 and
+nRF9131 devices. It supports Release 1 of the DECT-2020 New Radio (NR) technical specifications.
+
+DECT-2020 New Radio (NR) operation is enabled on frequency band 1, 2 and 9.
+
+It is recommended to use the latest version of nRF Connect and nRF Connect Programmer tools.
+
+This release version supports nRF9161 LACA A0 engineering and nRF9131 LACA A0 engineering SiP
+versions.
+
+*** New functionality
+*********************
+- HARQ soft bit combining. New data indication bit has effect in physical layer control header
+  type 2.
+- Modem subsystem thermal protection. Radio operations are prohibited if temperature conditions
+  exceed the operations limits set in nRF9131 and nRF9161 product specifications. Current
+  temperature value is returned in operation callbacks.
+- Automatic mechanism to lock nRF9131 calibration data. Automatic lock is performed when modem is
+  first time initialized with "nrf_modem_init". If nRF9131 calibration is not performed and modem
+  initialization is executed, error code is returned.
+- Continuous Wave (CW) support for unmodulated TX RF measurements.
+
+*** Changes
+***********
+- Updated physical layer latencies that affects libmodem API "nrf_modem_dect_phy_latency".
+
+*** Bug fixes
+*************
+-
+
+*** Limitations
+***************
+- Use of this release version is for R&D and test purposes only, and may not be used in products
+  or deriving products from this firmware.
+- Support of HARQ is limited.
+- Power consumption has not been optimized.
+- There are some L1 operation latency restrictions as reported by the modem.
+- Performance, for example firmware operation in weak radio signal conditions or condition with
+  control or data channel retransmissions, has not been optimized.
+
+*** Known Issues
+****************
+- Occasional modem instability when RSSI-1 measurements are performed during RX reception.
+
+*** MD5 checksums
+*****************
+
+21746FD.ipc_dfu.signed_2.0.0.ihex
+0650d50a2de554cd55ad8f722f949314 (MD5)
+
+firmware.update.image.cbor
+8b79e863d0b6d17a9d5c651ef6af6491 (MD5)
+
+firmware.update.image.digest.txt
+241567005b306e2f51bffaad543d7519 (MD5)
+
+firmware.update.image.segments.0.hex
+91c9e5658ae54dc19227b9f0f0908412 (MD5)
+
+firmware.update.image.segments.1.hex
+9d185e785ba4beb9cb1825fdec23b614 (MD5)
