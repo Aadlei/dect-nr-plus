@@ -35,7 +35,7 @@ config TX_POWER
 config TX_TRANSMISSIONS
 	int "TX transmissions"
 	range 0 4294967295
-	default 30
+	default 0
 	help
 	   Transmissions before sample exits, use 0 to transmit forever.
 
@@ -46,6 +46,11 @@ config RX_PERIOD_S
 	   Receive window period.
 	   Time is given in seconds.
 
+config DEVICE_TYPE
+	int "Device type"
+	default 2
+	help
+	   Device type to use. 0 is for bi-directional, 1 is for transmission only and two is gateway mode.
 module = DECT_PHY_HELLO
 module-str = DECT NR+ PHY Hello
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"

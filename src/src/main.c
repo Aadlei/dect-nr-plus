@@ -34,6 +34,12 @@ struct phy_ctrl_field_common {
 	uint32_t pad : 24;
 };
 
+enum device_type {
+	bi_directional = 0,
+	tx_only = 1,
+	rx_only = 2
+};
+
 /* Semaphore to synchronize modem calls. */
 K_SEM_DEFINE(operation_sem, 0, 1);
 
@@ -391,35 +397,40 @@ int main(void)
 	while (1) {
 		/** Transmitting message */
 		LOG_INF("Device id: %d", device_id);
-		LOG_INF("Transmitting %d", tx_counter_value);
-		tx_len = sprintf(tx_buf, "Hallo Gustav! Du er så halvorlig! %d", tx_counter_value) + 1; /* Include \0 */
 
-		err = transmit(tx_handle, tx_buf, tx_len);
-		if (err) {
-			LOG_ERR("Transmisstion failed, err %d", err);
-			return err;
+		if(CONFIG_DEVICE_TYPE == bidirectional || CONFIG_DEVICE_TYPE == tx_only) {
+			LOG_INF("Transmitting %d", tx_counter_value);
+			tx_len = sprintf(tx_buf, "MATHIAS SENDER YAPP %d", tx_counter_value) + 1; /* Include \0 */
+
+			err = transmit(tx_handle, tx_buf, tx_len);
+			if (err) {
+				LOG_ERR("Transmisstion failed, err %d", err);
+				return err;
+			}
+
+			tx_counter_value++;
+
+			/* Wait for TX operation to complete. */
+			k_sem_take(&operation_sem, K_FOREVER);
+
+			if ((tx_counter_value >= CONFIG_TX_TRANSMISSIONS) && CONFIG_TX_TRANSMISSIONS) {
+				LOG_INF("Reached maximum number of transmissions (%d)",
+					CONFIG_TX_TRANSMISSIONS);
+				break;
+			}
 		}
 
-		tx_counter_value++;
+		if(CONFIG_DEVICE_TYPE == bi_directional || CONFIG_DEVICE_TYPE == rx_only) {
+			/** Receiving messages for CONFIG_RX_PERIOD_S seconds. */
+			err = receive(rx_handle);
+			if (err) {
+				LOG_ERR("Reception failed, err %d", err);
+				return err;
+			}
 
-		/* Wait for TX operation to complete. */
-		k_sem_take(&operation_sem, K_FOREVER);
-
-		if ((tx_counter_value >= CONFIG_TX_TRANSMISSIONS) && CONFIG_TX_TRANSMISSIONS) {
-			LOG_INF("Reached maximum number of transmissions (%d)",
-				CONFIG_TX_TRANSMISSIONS);
-			break;
+			/* Wait for RX operation to complete. */
+			k_sem_take(&operation_sem, K_FOREVER);
 		}
-
-		/** Receiving messages for CONFIG_RX_PERIOD_S seconds. */
-		err = receive(rx_handle);
-		if (err) {
-			LOG_ERR("Reception failed, err %d", err);
-			return err;
-		}
-
-		/* Wait for RX operation to complete. */
-		k_sem_take(&operation_sem, K_FOREVER);
 	}
 
 	LOG_INF("Shutting down");
