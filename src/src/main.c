@@ -9,6 +9,7 @@
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
 #include <zephyr/drivers/hwinfo.h>
+#include "dect/common/dect_common.h"
 
 LOG_MODULE_REGISTER(app);
 
@@ -20,25 +21,7 @@ static bool exit;
 static uint16_t device_id;
 static uint64_t modem_time;
 
-/* Header type 1, due to endianness the order is different than in the specification. */
-struct phy_ctrl_field_common {
-	uint32_t packet_length : 4;
-	uint32_t packet_length_type : 1;
-	uint32_t header_format : 3;
-	uint32_t short_network_id : 8;
-	uint32_t transmitter_id_hi : 8;
-	uint32_t transmitter_id_lo : 8;
-	uint32_t df_mcs : 3;
-	uint32_t reserved : 1;
-	uint32_t transmit_power : 4;
-	uint32_t pad : 24;
-};
 
-enum device_type {
-	bi_directional = 0,
-	tx_only = 1,
-	rx_only = 2
-};
 
 /* Semaphore to synchronize modem calls. */
 K_SEM_DEFINE(operation_sem, 0, 1);
@@ -398,7 +381,7 @@ int main(void)
 		/** Transmitting message */
 		LOG_INF("Device id: %d", device_id);
 
-		if(CONFIG_DEVICE_TYPE == bidirectional || CONFIG_DEVICE_TYPE == tx_only) {
+		if(CONFIG_DEVICE_TYPE == ft_pt || CONFIG_DEVICE_TYPE == pt) {
 			LOG_INF("Transmitting %d", tx_counter_value);
 			tx_len = sprintf(tx_buf, "MATHIAS SENDER YAPP %d", tx_counter_value) + 1; /* Include \0 */
 
@@ -420,7 +403,7 @@ int main(void)
 			}
 		}
 
-		if(CONFIG_DEVICE_TYPE == bi_directional || CONFIG_DEVICE_TYPE == rx_only) {
+		if(CONFIG_DEVICE_TYPE == ft_pt || CONFIG_DEVICE_TYPE == ft) {
 			/** Receiving messages for CONFIG_RX_PERIOD_S seconds. */
 			err = receive(rx_handle);
 			if (err) {
