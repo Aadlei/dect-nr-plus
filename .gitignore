@@ -4,4 +4,4 @@
 .vscode/
 
 # build
-*/build/
+build/
