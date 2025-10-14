@@ -20,6 +20,9 @@
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_uart.h>
 
+#include <dect_common.h>
+#include <dect_phy_mac_common.h>
+
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
 
@@ -166,27 +169,6 @@ int main(void)
 {
 	int err;
 
-	desh_shell = shell_backend_uart_get_ptr();
-
-	__ASSERT(desh_shell != NULL, "Failed to get shell backend");
-
-	/* Reset reason can only be read once, because the register needs to be cleared after
-	 * reading.
-	 */
-	desh_print_reset_reason();
-
-#if defined(CONFIG_DESH_STARTUP_CMDS)
-	struct k_work_queue_config cfg = {
-		.name = "desh_common_workq",
-	};
-
-	k_work_queue_start(
-		&desh_common_work_q,
-		desh_common_workq_stack,
-		K_THREAD_STACK_SIZEOF(desh_common_workq_stack),
-		DESH_COMMON_WORKQ_PRIORITY,
-		&cfg);
-#endif
 	err = nrf_modem_lib_init();
 	if (err) {
 		/* Modem library initialization failed. */
@@ -194,20 +176,31 @@ int main(void)
 		printk("Fatal error\n");
 		return 0;
 	}
-#if defined(CONFIG_DESH_STARTUP_CMDS)
-	startup_cmd_ctrl_init();
-#endif
-#if defined(CONFIG_DK_LIBRARY)
-	err = dk_leds_init();
-	if (err) {
-		printk("Cannot initialize LEDs (err: %d)\n", err);
+
+	#if defined(CONFIG_DK_LIBRARY)
+		err = dk_leds_init();
+		if (err) {
+			printk("Cannot initialize LEDs (err: %d)\n", err);
+		}
+	#endif
+
+	#if defined(CONFIG_DESH_STARTUP_CMDS)
+		startup_cmd_ctrl_init();
+	#endif
+
+	while(1) {
+		struct dect_phy_mac_beacon_start_params params = {
+			.tx_power_dbm = 23,
+			.beacon_channel = 1655,
+		};
+		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+		if (ret) {
+			printk("Cannot start beacon, err %d", ret);
+		} else {
+			printk("Beacon starting");
+		}
+		k_sleep(K_SECONDS(1));
 	}
-#endif
-
-	/* Resize terminal width and height of the shell to have proper command editing. */
-	shell_execute_cmd(desh_shell, "resize");
-
-	desh_print_version_info();
 
 	return 0;
 }

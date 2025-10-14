@@ -1,0 +1,6 @@
+{
+    "files.associations": {
+        "desh_print.h": "c",
+        "log.h": "c"
+    }
+}
