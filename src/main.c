@@ -22,6 +22,7 @@
 
 #include <dect_common.h>
 #include <dect_phy_mac_common.h>
+#include <dect_phy_mac_ctrl.h>
 
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
@@ -169,6 +170,8 @@ int main(void)
 {
 	int err;
 
+	desh_shell = shell_backend_uart_get_ptr();
+
 	err = nrf_modem_lib_init();
 	if (err) {
 		/* Modem library initialization failed. */
@@ -199,7 +202,7 @@ int main(void)
 		} else {
 			printk("Beacon starting");
 		}
-		k_sleep(K_SECONDS(1));
+		k_sleep(K_SECONDS(5));
 	}
 
 	return 0;
