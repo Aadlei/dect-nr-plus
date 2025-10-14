@@ -192,17 +192,25 @@ int main(void)
 	#endif
 
 	while(1) {
-		struct dect_phy_mac_beacon_start_params params = {
-			.tx_power_dbm = 23,
-			.beacon_channel = 1655,
+		struct dect_phy_mac_beacon_scan_params params = {
+			.duration_secs = 4,
+			.channel = 1665,
+			.expected_rssi_level = 0,
+			.clear_nbr_cache_before_scan = 1,
+			.suspend_scheduler = 1, // Force this scan above other tasks
 		};
-		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-		if (ret) {
-			printk("Cannot start beacon, err %d", ret);
-		} else {
-			printk("Beacon starting");
+
+		int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
+		if (ret)
+		{
+			desh_error("Cannot start beacon scan, err %d", ret);
 		}
-		k_sleep(K_SECONDS(5));
+		else
+		{
+			desh_print("Beacon scan started.");
+		}
+
+		k_sleep(K_SECONDS(30));
 	}
 
 	return 0;
