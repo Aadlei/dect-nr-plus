@@ -15,7 +15,7 @@
 /************************************************************************************************/
 
 #define DECT_PHY_DEFAULT_NETWORK_ID			0x12345678
-#define DECT_PHY_DEFAULT_TRANSMITTER_LONG_RD_ID		38
+#define DECT_PHY_DEFAULT_TRANSMITTER_LONG_RD_ID		CONFIG_DECT_TRANSMITTER_ID
 #define DECT_PHY_API_SCHEDULER_OFFSET_US		(5000)
 
 #define DECT_PHY_SETT_DEFAULT_BEACON_TX_INTERVAL_SECS	2

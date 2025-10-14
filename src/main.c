@@ -28,6 +28,7 @@
 #include <modem/nrf_modem_lib_trace.h>
 
 #include <dk_buttons_and_leds.h>
+#include <zephyr/drivers/hwinfo.h>
 
 #if defined(CONFIG_DESH_STARTUP_CMDS)
 #include "startup_cmd_ctrl.h"
@@ -49,6 +50,7 @@ struct k_work_q desh_common_work_q;
 
 /* Global variables */
 const struct shell *desh_shell;
+static uint16_t device_id;
 
 char desh_at_resp_buf[DESH_AT_CMD_RESPONSE_MAX_LEN];
 K_MUTEX_DEFINE(desh_at_resp_buf_mutex);
@@ -172,6 +174,7 @@ int main(void)
 
 	desh_shell = shell_backend_uart_get_ptr();
 
+
 	err = nrf_modem_lib_init();
 	if (err) {
 		/* Modem library initialization failed. */
@@ -190,19 +193,25 @@ int main(void)
 	#if defined(CONFIG_DESH_STARTUP_CMDS)
 		startup_cmd_ctrl_init();
 	#endif
+	hwinfo_get_device_id((void *)&device_id, sizeof(device_id));
+	printk("DECT NR+ Started. Device id: %u\n", device_id);
 
 	while(1) {
 		struct dect_phy_mac_beacon_start_params params = {
-			.tx_power_dbm = 23,
-			.beacon_channel = 1655,
+			.tx_power_dbm = 0,
+			.beacon_channel = 1665,
 		};
 		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+		printk("Beacon returned: %d\n", ret);
 		if (ret) {
 			printk("Cannot start beacon, err %d", ret);
 		} else {
 			printk("Beacon starting");
 		}
-		k_sleep(K_SECONDS(5));
+
+
+
+		k_sleep(K_SECONDS(30));
 	}
 
 	return 0;
