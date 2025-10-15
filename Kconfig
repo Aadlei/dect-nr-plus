@@ -25,4 +25,10 @@ config DESH_STARTUP_CMDS
 	bool "Possibility to run stored shell commands from settings after bootup"
 	default y
 
+config DECT_TRANSMITTER_ID
+	int "DECT NR+ Transmitter ID"
+	default 38
+	help
+	  DECT NR+ Transmitter ID (long rd id). Range 0..65535
+
 endmenu
