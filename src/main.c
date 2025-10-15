@@ -23,6 +23,9 @@
 #include <dect_common.h>
 #include <dect_phy_mac_common.h>
 #include <dect_phy_mac_ctrl.h>
+#include <dect_phy_mac_nbr.h>
+#include "dect_app_time.h"
+#include "dect_phy_mac_nbr_bg_scan.h"
 
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
@@ -191,7 +194,10 @@ int main(void)
 		startup_cmd_ctrl_init();
 	#endif
 
-	while(1) {
+	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info();
+
+	while(1)
+	{
 		struct dect_phy_mac_beacon_scan_params params = {
 			.duration_secs = 4,
 			.channel = 1665,
@@ -209,7 +215,33 @@ int main(void)
 		{
 			desh_print("Beacon scan started.");
 		}
+		
+		uint64_t time_now = dect_app_modem_time_now();
+		desh_print("Neighbor list status:");
+		for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
+			struct dect_phy_mac_nbr_info_list_item current_neighbor = *(ptr_nbrs + i);
 
+			if (current_neighbor.reserved == true) {
+				int64_t time_from_last_received_ms = MODEM_TICKS_TO_MS(
+						time_now - current_neighbor.time_rcvd_mdm_ticks);
+
+				desh_print("  Neighbor %d:", i + 1);
+				desh_print("   network ID (24bit MSB): %u (0x%06x)", current_neighbor.nw_id_24msb,
+					current_neighbor.nw_id_24msb);
+				desh_print("   network ID (8bit LSB):  %u (0x%02x)", current_neighbor.nw_id_8lsb,
+					current_neighbor.nw_id_8lsb);
+				desh_print("   network ID (32bit):     %u (0x%06x)", current_neighbor.nw_id_32bit,
+					current_neighbor.nw_id_32bit);
+				desh_print("   long RD ID:             %u", current_neighbor.long_rd_id);
+				desh_print("   short RD ID:            %u", current_neighbor.short_rd_id);
+				desh_print("   channel:                %u", current_neighbor.channel);
+				desh_print("   Last seen:              %d msecs ago",
+					time_from_last_received_ms);
+				dect_phy_mac_nbr_bg_scan_status_print_for_target_long_rd_id(
+					current_neighbor.long_rd_id);
+			}
+		}
+		
 		k_sleep(K_SECONDS(30));
 	}
 
