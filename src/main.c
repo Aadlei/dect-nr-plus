@@ -206,16 +206,24 @@ int main(void)
 			.suspend_scheduler = 1, // Force this scan above other tasks
 		};
 
-		int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
-		if (ret)
+		for (int i = 0; i < 5; i++)
 		{
-			desh_error("Cannot start beacon scan, err %d", ret);
+			int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
+			if (ret)
+			{
+				desh_error("Cannot start beacon scan, err %d", ret);
+			}
+			else
+			{
+				desh_print("Beacon scan started.");
+			}
+
+			k_sleep(K_SECONDS(10));
 		}
-		else
-		{
-			desh_print("Beacon scan started.");
-		}
-		
+
+		k_sleep(K_SECONDS(15));
+
+		// PRINT NEIGHBOR LIST
 		uint64_t time_now = dect_app_modem_time_now();
 		desh_print("Neighbor list status:");
 		for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
