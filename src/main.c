@@ -196,33 +196,36 @@ int main(void)
 
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info();
 
-	while(1)
+	struct dect_phy_mac_beacon_scan_params params = {
+		.duration_secs = 4,
+		.channel = 1665,
+		.expected_rssi_level = 0,
+		.clear_nbr_cache_before_scan = 1,
+		.suspend_scheduler = 1, // Force this scan above other tasks
+	};
+
+	for (int i = 0; i < 5; i++)
 	{
-		struct dect_phy_mac_beacon_scan_params params = {
-			.duration_secs = 4,
-			.channel = 1665,
-			.expected_rssi_level = 0,
-			.clear_nbr_cache_before_scan = 1,
-			.suspend_scheduler = 1, // Force this scan above other tasks
-		};
-
-		for (int i = 0; i < 5; i++)
+		int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
+		if (ret)
 		{
-			int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
-			if (ret)
-			{
-				desh_error("Cannot start beacon scan, err %d", ret);
-			}
-			else
-			{
-				desh_print("Beacon scan started.");
-			}
-
-			k_sleep(K_SECONDS(10));
+			desh_error("Cannot start beacon scan, err %d", ret);
+		}
+		else
+		{
+			desh_print("Beacon scan started.");
 		}
 
-		k_sleep(K_SECONDS(15));
+		k_sleep(K_SECONDS(10));
+	}
 
+	desh_print("Stopping beacon.");
+	dect_phy_mac_ctrl_cluster_beacon_stop(DECT_PHY_MAC_CTRL_BEACON_STOP_CAUSE_USER_INITIATED);
+
+	k_sleep(K_SECONDS(10));
+
+	while(1)
+	{
 		// PRINT NEIGHBOR LIST
 		uint64_t time_now = dect_app_modem_time_now();
 		desh_print("Neighbor list status:");
@@ -250,7 +253,7 @@ int main(void)
 			}
 		}
 		
-		k_sleep(K_SECONDS(30));
+		k_sleep(K_SECONDS(15));
 	}
 
 	return 0;
