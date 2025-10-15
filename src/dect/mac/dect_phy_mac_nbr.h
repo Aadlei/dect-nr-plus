@@ -50,4 +50,7 @@ bool dect_phy_mac_nbr_is_in_channel(uint16_t channel);
 
 void dect_phy_mac_nbr_status_print(void);
 
+/* Custom shit */
+struct dect_phy_mac_nbr_info_list_item *dect_phy_mac_nbr_info(void);
+
 #endif /* DECT_PHY_MAC_NBR_H */
