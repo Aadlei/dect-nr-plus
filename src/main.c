@@ -198,11 +198,9 @@ int main(void)
 	struct dect_phy_settings current_settings;
 	dect_common_settings_read(&current_settings);
 
-
-	struct dect_phy_settings newsettings = current_settings;
 	uint32_t long_rd_id = 47755;
-	newsettings.common.transmitter_id = long_rd_id;
-	dect_common_settings_write(&newsettings);
+	current_settings.common.transmitter_id = long_rd_id;
+	dect_common_settings_write(&current_settings);
 
 	desh_print("Common settings:");
 	desh_print("  network id (32bit).............................%u (0x%08x)",
