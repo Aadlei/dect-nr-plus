@@ -20,6 +20,12 @@
 #include <zephyr/shell/shell.h>
 #include <zephyr/shell/shell_uart.h>
 
+#include <zephyr/device.h>
+#include <zephyr/drivers/gpio.h>
+#include <zephyr/sys/util.h>
+#include <zephyr/sys/printk.h>
+#include <inttypes.h>
+
 #include <dect_common.h>
 #include <dect_common_settings.h>
 #include <dect_phy_mac_common.h>
@@ -50,6 +56,14 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_SHELL_BACKEND_SERIAL),
 K_THREAD_STACK_DEFINE(desh_common_workq_stack, DESH_COMMON_WORKQUEUE_STACK_SIZE);
 struct k_work_q desh_common_work_q;
 #endif
+
+#define SW0_NODE	DT_ALIAS(sw0)
+#if !DT_NODE_HAS_STATUS_OKAY(SW0_NODE)
+#error "Unsupported board: sw0 devicetree alias is not defined"
+#endif
+static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios,
+							      {0});
+static struct gpio_callback button_cb_data;
 
 /* Global variables */
 const struct shell *desh_shell;
@@ -170,8 +184,42 @@ static void desh_print_reset_reason(void)
 	printk("\nReset reason: %s\n", reset_reason_str);
 }
 
+void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
+}
+
 int main(void)
 {
+	int ret;
+
+	/* Button */
+	if (!gpio_is_ready_dt(&button)) {
+		printk("Error: button device %s is not ready\n",
+		       button.port->name);
+		return 0;
+	}
+
+	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
+	if (ret != 0) {
+		printk("Error %d: failed to configure %s pin %d\n",
+		       ret, button.port->name, button.pin);
+		return 0;
+	}
+
+	ret = gpio_pin_interrupt_configure_dt(&button,
+					      GPIO_INT_EDGE_TO_ACTIVE);
+	if (ret != 0) {
+		printk("Error %d: failed to configure interrupt on %s pin %d\n",
+			ret, button.port->name, button.pin);
+		return 0;
+	}
+
+	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
+	gpio_add_callback(button.port, &button_cb_data);
+	printk("Set up button at %s pin %d\n", button.port->name, button.pin);
+
+
 	/* Configuration setup */
 	int err;
 
@@ -283,6 +331,7 @@ int main(void)
 
 	while(1)
 	{
+		/*
 		// PRINT NEIGHBOR LIST
 		uint64_t time_now = dect_app_modem_time_now();
 		desh_print("Neighbor list status:");
@@ -309,7 +358,7 @@ int main(void)
 			}
 		}
 		
-		k_sleep(K_SECONDS(15));
+		k_sleep(K_SECONDS(15)); */
 	}
 
 	return 0;
