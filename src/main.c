@@ -218,6 +218,7 @@ int main(void)
 		   current_settings.common.short_rd_id, current_settings.common.short_rd_id);
 	desh_print("  band number....................................%d",
 		   current_settings.common.band_nbr);
+	desh_print("\n");
 
 
 	/* Run beacon scan for 30 seconds, then stop */
@@ -249,32 +250,62 @@ int main(void)
 
 	k_sleep(K_SECONDS(10));
 
+
+	/* Find the neighbor and send association request */
+	if (ptr_nbrs->reserved == true) // Get the first neighbor if it is registered
+	{
+		int ret = 0;
+		
+		uint32_t nbr_long_rd_id = ptr_nbrs->long_rd_id;
+
+		struct dect_phy_mac_associate_params params;
+		params.tx_power_dbm = 0;
+		params.mcs = 0;
+		params.target_long_rd_id = nbr_long_rd_id;
+
+		ret = dect_phy_mac_ctrl_associate(&params); // Send association request
+		if (ret)
+		{
+			desh_error("Cannot send association request to PT %u "
+				"a random access resource, err %d",
+					params.target_long_rd_id, ret);
+		}
+		else
+		{
+			desh_print("Association request TX started.");
+		}
+	}
+	else
+	{
+		desh_print("No neighbors found. Do not send association request.");
+	}
+
+
 	while(1)
 	{
 		// PRINT NEIGHBOR LIST
 		uint64_t time_now = dect_app_modem_time_now();
 		desh_print("Neighbor list status:");
-		for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-			struct dect_phy_mac_nbr_info_list_item current_neighbor = *(ptr_nbrs + i);
-
-			if (current_neighbor.reserved == true) {
+		for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++)
+		{
+			if ((ptr_nbrs + i)->reserved == true) {
 				int64_t time_from_last_received_ms = MODEM_TICKS_TO_MS(
-						time_now - current_neighbor.time_rcvd_mdm_ticks);
+						time_now - (ptr_nbrs + i)->time_rcvd_mdm_ticks);
 
 				desh_print("  Neighbor %d:", i + 1);
-				desh_print("   network ID (24bit MSB): %u (0x%06x)", current_neighbor.nw_id_24msb,
-					current_neighbor.nw_id_24msb);
-				desh_print("   network ID (8bit LSB):  %u (0x%02x)", current_neighbor.nw_id_8lsb,
-					current_neighbor.nw_id_8lsb);
-				desh_print("   network ID (32bit):     %u (0x%06x)", current_neighbor.nw_id_32bit,
-					current_neighbor.nw_id_32bit);
-				desh_print("   long RD ID:             %u", current_neighbor.long_rd_id);
-				desh_print("   short RD ID:            %u", current_neighbor.short_rd_id);
-				desh_print("   channel:                %u", current_neighbor.channel);
+				desh_print("   network ID (24bit MSB): %u (0x%06x)", (ptr_nbrs + i)->nw_id_24msb,
+					(ptr_nbrs + i)->nw_id_24msb);
+				desh_print("   network ID (8bit LSB):  %u (0x%02x)", (ptr_nbrs + i)->nw_id_8lsb,
+					(ptr_nbrs + i)->nw_id_8lsb);
+				desh_print("   network ID (32bit):     %u (0x%06x)", (ptr_nbrs + i)->nw_id_32bit,
+					(ptr_nbrs + i)->nw_id_32bit);
+				desh_print("   long RD ID:             %u", (ptr_nbrs + i)->long_rd_id);
+				desh_print("   short RD ID:            %u", (ptr_nbrs + i)->short_rd_id);
+				desh_print("   channel:                %u", (ptr_nbrs + i)->channel);
 				desh_print("   Last seen:              %d msecs ago",
 					time_from_last_received_ms);
 				dect_phy_mac_nbr_bg_scan_status_print_for_target_long_rd_id(
-					current_neighbor.long_rd_id);
+					(ptr_nbrs + i)->long_rd_id);
 			}
 		}
 		
