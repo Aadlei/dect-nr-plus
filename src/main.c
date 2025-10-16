@@ -57,13 +57,26 @@ K_THREAD_STACK_DEFINE(desh_common_workq_stack, DESH_COMMON_WORKQUEUE_STACK_SIZE)
 struct k_work_q desh_common_work_q;
 #endif
 
+/* Button definition */
 #define SW0_NODE	DT_ALIAS(sw0)
 #if !DT_NODE_HAS_STATUS_OKAY(SW0_NODE)
 #error "Unsupported board: sw0 devicetree alias is not defined"
 #endif
-static const struct gpio_dt_spec button = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios,
-							      {0});
-static struct gpio_callback button_cb_data;
+
+#define SW1_NODE	DT_ALIAS(sw1)
+#if !DT_NODE_HAS_STATUS_OKAY(SW1_NODE)
+#error "Unsupported board: sw1 devicetree alias is not defined"
+#endif
+
+#define SW2_NODE	DT_ALIAS(sw2)
+#if !DT_NODE_HAS_STATUS_OKAY(SW2_NODE)
+#error "Unsupported board: sw2 devicetree alias is not defined"
+#endif
+
+#define SW3_NODE	DT_ALIAS(sw3)
+#if !DT_NODE_HAS_STATUS_OKAY(SW3_NODE)
+#error "Unsupported board: sw3 devicetree alias is not defined"
+#endif
 
 /* Global variables */
 const struct shell *desh_shell;
@@ -134,6 +147,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
 
+/*
 static void reset_reason_str_get(char *str, uint32_t reason)
 {
 	size_t len;
@@ -175,7 +189,7 @@ static void desh_print_reset_reason(void)
 	uint32_t reset_reason;
 	char reset_reason_str[128];
 
-	/* Read RESETREAS register value and clear current reset reason(s). */
+	// Read RESETREAS register value and clear current reset reason(s).
 	reset_reason = nrfx_reset_reason_get();
 	nrfx_reset_reason_clear(reset_reason);
 
@@ -183,46 +197,87 @@ static void desh_print_reset_reason(void)
 
 	printk("\nReset reason: %s\n", reset_reason_str);
 }
+*/
 
-void button_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+/* Button crap */
+// Button 1: 
+// Button 2:
+// Button 3:
+// Button 4:
+
+static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
+static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
+static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0});
+static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
+
+static struct gpio_callback button_1_cb_data;
+static struct gpio_callback button_2_cb_data;
+static struct gpio_callback button_3_cb_data;
+static struct gpio_callback button_4_cb_data;
+
+static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
+static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
+
+void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	printk("Button pressed at %" PRIu32 "\n", k_cycle_get_32());
+	printk("Button 1 pressed\n");
 }
+
+void button_2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	printk("Button 2 pressed\n");
+}
+
+void button_3_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	printk("Button 3 pressed\n");
+}
+
+void button_4_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
+{
+	printk("Button 4 pressed\n");
+}
+
+static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio_callback *cb, uint32_t pins) =
+{
+	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
+};
 
 int main(void)
 {
-	int ret;
-
-	/* Button */
-	if (!gpio_is_ready_dt(&button)) {
-		printk("Error: button device %s is not ready\n",
-		       button.port->name);
-		return 0;
-	}
-
-	ret = gpio_pin_configure_dt(&button, GPIO_INPUT);
-	if (ret != 0) {
-		printk("Error %d: failed to configure %s pin %d\n",
-		       ret, button.port->name, button.pin);
-		return 0;
-	}
-
-	ret = gpio_pin_interrupt_configure_dt(&button,
-					      GPIO_INT_EDGE_TO_ACTIVE);
-	if (ret != 0) {
-		printk("Error %d: failed to configure interrupt on %s pin %d\n",
-			ret, button.port->name, button.pin);
-		return 0;
-	}
-
-	gpio_init_callback(&button_cb_data, button_pressed, BIT(button.pin));
-	gpio_add_callback(button.port, &button_cb_data);
-	printk("Set up button at %s pin %d\n", button.port->name, button.pin);
-
-
-	/* Configuration setup */
 	int err;
 
+	/* Buttons configuration */
+	int ret;
+
+	for (int i = 0; i < 4; i++)
+	{
+		if (!gpio_is_ready_dt(ptr_buttons[i]))
+		{
+			printk("Error: button device %s is not ready\n", *ptr_buttons[i]->port->name);
+			return 0;
+		}
+
+		ret = gpio_pin_configure_dt(ptr_buttons[i], GPIO_INPUT);
+		if (ret != 0) {
+			printk("Error %d: failed to configure %s pin %d\n",
+				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
+			return 0;
+		}
+
+		ret = gpio_pin_interrupt_configure_dt(ptr_buttons[i], GPIO_INT_EDGE_TO_ACTIVE);
+		if (ret != 0) {
+			printk("Error %d: failed to configure interrupt on %s pin %d\n",
+				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
+			return 0;
+		}
+
+		gpio_init_callback(ptr_buttons_cb_data[i], ptr_buttons_pressed[i], BIT(ptr_buttons[i]->pin));
+		gpio_add_callback(ptr_buttons[i]->port, ptr_buttons_cb_data[i]);
+		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
+	}
+
+	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
 
 	err = nrf_modem_lib_init();
