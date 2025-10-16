@@ -21,6 +21,7 @@
 #include <zephyr/shell/shell_uart.h>
 
 #include <dect_common.h>
+#include <dect_common_settings.h>
 #include <dect_phy_mac_common.h>
 #include <dect_phy_mac_ctrl.h>
 #include <dect_phy_mac_nbr.h>
@@ -193,6 +194,25 @@ int main(void)
 	#if defined(CONFIG_DESH_STARTUP_CMDS)
 		startup_cmd_ctrl_init();
 	#endif
+
+	struct dect_phy_settings current_settings;
+	dect_common_settings_read(&current_settings);
+
+
+	struct dect_phy_settings newsettings = current_settings;
+	uint32_t long_rd_id = 47755;
+	newsettings.common.transmitter_id = long_rd_id;
+	dect_common_settings_write(&newsettings);
+
+	desh_print("Common settings:");
+	desh_print("  network id (32bit).............................%u (0x%08x)",
+		   current_settings.common.network_id, current_settings.common.network_id);
+	desh_print("  transmitter id (long RD ID)....................%u (0x%08x)",
+		   current_settings.common.transmitter_id, current_settings.common.transmitter_id);
+	desh_print("  short RD ID....................................%u (0x%04x)",
+		   current_settings.common.short_rd_id, current_settings.common.short_rd_id);
+	desh_print("  band number....................................%d",
+		   current_settings.common.band_nbr);
 
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info();
 
