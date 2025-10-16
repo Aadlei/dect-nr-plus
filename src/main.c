@@ -172,6 +172,7 @@ static void desh_print_reset_reason(void)
 
 int main(void)
 {
+	/* Configuration setup */
 	int err;
 
 	desh_shell = shell_backend_uart_get_ptr();
@@ -190,18 +191,24 @@ int main(void)
 			printk("Cannot initialize LEDs (err: %d)\n", err);
 		}
 	#endif
-
+	
 	#if defined(CONFIG_DESH_STARTUP_CMDS)
 		startup_cmd_ctrl_init();
 	#endif
 
-	struct dect_phy_settings current_settings;
-	dect_common_settings_read(&current_settings);
+	/* Important structs for the running device */
+	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Neighbor list
+	struct dect_phy_settings current_settings; // The device settings
 
-	uint32_t long_rd_id = 47755;
+
+	/* Read and write current settings */
+	dect_common_settings_read(&current_settings);
+	uint32_t long_rd_id = 9876; // Just a random value
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
+
+	/* Print current settings */
 	desh_print("Common settings:");
 	desh_print("  network id (32bit).............................%u (0x%08x)",
 		   current_settings.common.network_id, current_settings.common.network_id);
@@ -212,8 +219,8 @@ int main(void)
 	desh_print("  band number....................................%d",
 		   current_settings.common.band_nbr);
 
-	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info();
 
+	/* Run beacon scan for 30 seconds, then stop */
 	struct dect_phy_mac_beacon_scan_params params = {
 		.duration_secs = 4,
 		.channel = 1665,
@@ -221,8 +228,8 @@ int main(void)
 		.clear_nbr_cache_before_scan = 1,
 		.suspend_scheduler = 1, // Force this scan above other tasks
 	};
-
-	for (int i = 0; i < 5; i++)
+	
+	for (int i = 0; i < 3; i++)
 	{
 		int ret = dect_phy_mac_ctrl_beacon_scan_start(&params);
 		if (ret)
