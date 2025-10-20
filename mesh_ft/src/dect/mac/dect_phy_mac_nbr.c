@@ -196,3 +196,9 @@ bool dect_phy_mac_nbr_is_in_channel(uint16_t channel)
 	k_mutex_unlock(&nbr_list_mutex);
 	return return_value;
 }
+
+/* Custom shit */
+struct dect_phy_mac_nbr_info_list_item *dect_phy_mac_nbr_info(void)
+{
+	return nbrs;
+}
