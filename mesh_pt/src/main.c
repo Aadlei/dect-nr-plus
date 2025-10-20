@@ -491,15 +491,16 @@ int main(void)
 	{
 		desh_error("Failed to scan for FT beacons, err %d", err);
 		return 0;
-	} else {
-		desh_print("Neigbours discovered after scan:");
-		for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				desh_print("FT #%d:", i + 1);
-				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
-				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
-		}
+	} 
+
+	desh_print("Neigbours discovered after scan:");
+	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
+			desh_print("FT #%d:", i + 1);
+			desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
+			desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
+			desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
 	}
+	
 	
 	k_sleep(K_SECONDS(2));
 	struct dect_phy_mac_nbr_info_list_item *nbr_list = dect_phy_mac_nbr_info();
