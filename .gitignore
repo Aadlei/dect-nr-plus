@@ -5,6 +5,7 @@
 
 # build
 *build/
+build/
 
 # JetBrains
 .idea/

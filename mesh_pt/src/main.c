@@ -34,6 +34,7 @@
 #include "dect_app_time.h"
 #include "dect_phy_mac_nbr_bg_scan.h"
 #include "dect_phy_mac_nbr.h"
+#include "dect_phy_mac_client.h"
 
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
@@ -200,7 +201,7 @@ static void desh_print_reset_reason(void)
 }
 */
 
-/* Button crap */
+/* Button crap 
 // Button 1: 
 // Button 2:
 // Button 3:
@@ -218,22 +219,6 @@ static struct gpio_callback button_4_cb_data;
 
 static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
 static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
-
-struct pt_association_info {
-    bool is_associated;
-    uint32_t ft_long_rd_id;
-    uint16_t ft_short_rd_id;
-    uint32_t network_id;
-    uint16_t channel;
-};
-
-static struct pt_association_info my_association = {
-    .is_associated = false,
-    .ft_long_rd_id = 0,
-    .ft_short_rd_id = 0,
-    .network_id = 0,
-    .channel = 0
-};
 
 void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
@@ -259,11 +244,29 @@ static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio
 {
 	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
 };
+*/
+
+struct pt_association_info {
+    bool is_associated;
+    uint32_t ft_long_rd_id;
+    uint16_t ft_short_rd_id;
+    uint32_t network_id;
+    uint16_t channel;
+};
+
+static struct pt_association_info my_association = {
+    .is_associated = false,
+    .ft_long_rd_id = 0,
+    .ft_short_rd_id = 0,
+    .network_id = 0,
+    .channel = 0
+};
 
 int scan_for_ft_beacons(void)
 {
     desh_print("Starting beacon scan to find FT devices...");
     
+	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
         .duration_secs = 10,
         .channel = 1665,  // Or 0 to scan all channels
@@ -409,7 +412,7 @@ int main(void)
 {
 	int err;
 
-	/* Buttons configuration */
+	/* Buttons configuration 
 	int ret;
 
 	for (int i = 0; i < 4; i++)
@@ -438,6 +441,8 @@ int main(void)
 		gpio_add_callback(ptr_buttons[i]->port, ptr_buttons_cb_data[i]);
 		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
 	}
+
+	*/
 
 	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
@@ -495,6 +500,8 @@ int main(void)
 
 	desh_print("Neigbours discovered after scan:");
 	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
+		if (!(ptr_nbrs + i)->reserved) continue;
+
 			desh_print("FT #%d:", i + 1);
 			desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
 			desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
