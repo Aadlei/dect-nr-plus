@@ -223,7 +223,7 @@ int scan_for_ft_beacons(void)
     
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
-        .duration_secs = 10,
+        .duration_secs = 4,
         .channel = 1665,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
         .clear_nbr_cache_before_scan = 1,
@@ -239,7 +239,7 @@ int scan_for_ft_beacons(void)
     desh_print("Beacon scan started. Waiting for results...");
     
     // Wait for scan to complete
-    k_sleep(K_SECONDS(params.duration_secs + 2));
+    // k_sleep(K_SECONDS(params.duration_secs + 5));
     
     return 0;
 }
@@ -414,20 +414,23 @@ int main(void)
 	desh_print("\n");
 
 
-	err = scan_for_ft_beacons();
-	if (err) 
-	{
-		desh_error("Failed to scan for FT beacons, err %d", err);
-		return 0;
-	} 
 
 	uint32_t target_ft_long_rd_id = 0;
 
 	// While no FT found, keep scanning
 	while(target_ft_long_rd_id == 0) {
+		err = scan_for_ft_beacons();
+		if (err) 
+		{
+			desh_error("Failed to scan for FT beacons, err %d", err);
+			return 0;
+		}
+
+		k_sleep(K_SECONDS(10));
+
 		desh_print("\n=== Discovered FT Devices ===");
 			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				if (!(ptr_nbrs + i)->reserved) continue; 
+				if (!(ptr_nbrs+i)->reserved) continue; 
 				
 				desh_print("FT #%d:", i + 1);
 				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
@@ -443,7 +446,6 @@ int main(void)
 			desh_print("=============================\n");
 		if (target_ft_long_rd_id == 0) {
         	desh_error("No FT devices found! Retrying...");
-			k_sleep(K_SECONDS(10));
     	}
 	}
 
