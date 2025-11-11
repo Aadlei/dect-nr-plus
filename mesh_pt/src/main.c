@@ -201,51 +201,6 @@ static void desh_print_reset_reason(void)
 }
 */
 
-/* Button crap 
-// Button 1: 
-// Button 2:
-// Button 3:
-// Button 4:
-
-static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
-static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
-static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0});
-static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
-
-static struct gpio_callback button_1_cb_data;
-static struct gpio_callback button_2_cb_data;
-static struct gpio_callback button_3_cb_data;
-static struct gpio_callback button_4_cb_data;
-
-static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
-static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
-
-void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 1 pressed\n");
-}
-
-void button_2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 2 pressed\n");
-}
-
-void button_3_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 3 pressed\n");
-}
-
-void button_4_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 4 pressed\n");
-}
-
-static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio_callback *cb, uint32_t pins) =
-{
-	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
-};
-*/
-
 struct pt_association_info {
     bool is_associated;
     uint32_t ft_long_rd_id;
@@ -412,38 +367,6 @@ int main(void)
 {
 	int err;
 
-	/* Buttons configuration 
-	int ret;
-
-	for (int i = 0; i < 4; i++)
-	{
-		if (!gpio_is_ready_dt(ptr_buttons[i]))
-		{
-			printk("Error: button device %s is not ready\n", *ptr_buttons[i]->port->name);
-			return 0;
-		}
-
-		ret = gpio_pin_configure_dt(ptr_buttons[i], GPIO_INPUT);
-		if (ret != 0) {
-			printk("Error %d: failed to configure %s pin %d\n",
-				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-			return 0;
-		}
-
-		ret = gpio_pin_interrupt_configure_dt(ptr_buttons[i], GPIO_INT_EDGE_TO_ACTIVE);
-		if (ret != 0) {
-			printk("Error %d: failed to configure interrupt on %s pin %d\n",
-				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-			return 0;
-		}
-
-		gpio_init_callback(ptr_buttons_cb_data[i], ptr_buttons_pressed[i], BIT(ptr_buttons[i]->pin));
-		gpio_add_callback(ptr_buttons[i]->port, ptr_buttons_cb_data[i]);
-		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-	}
-
-	*/
-
 	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
 
@@ -498,37 +421,24 @@ int main(void)
 		return 0;
 	} 
 
-	desh_print("Neigbours discovered after scan:");
-	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-		if (!(ptr_nbrs + i)->reserved) continue;
-
-			desh_print("FT #%d:", i + 1);
-			desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
-			desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-			desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
-	}
-	
-	
-	k_sleep(K_SECONDS(2));
-	struct dect_phy_mac_nbr_info_list_item *nbr_list = dect_phy_mac_nbr_info();
-    uint32_t target_ft_long_rd_id = 0;
-
+	uint32_t target_ft_long_rd_id = 0;
 
 	// While no FT found, keep scanning
 	while(target_ft_long_rd_id == 0) {
 		desh_print("\n=== Discovered FT Devices ===");
 			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				if ((nbr_list + i)->reserved) {
-					desh_print("FT #%d:", i + 1);
-					desh_print("  Long RD ID: %u", (nbr_list + i)->long_rd_id);
-					desh_print("  Short RD ID: %u", (nbr_list + i)->short_rd_id);
-					desh_print("  Channel: %u", (nbr_list + i)->channel);
-					
-					// Use first discovered FT
-					if (target_ft_long_rd_id == 0) {
-						target_ft_long_rd_id = (nbr_list + i)->long_rd_id;
-					}
+				if (!(ptr_nbrs + i)->reserved) continue; 
+				
+				desh_print("FT #%d:", i + 1);
+				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
+				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
+				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+				
+				// Use first discovered FT
+				if (target_ft_long_rd_id == 0) {
+					target_ft_long_rd_id = (ptr_nbrs + i)->long_rd_id;
 				}
+				
 			}
 			desh_print("=============================\n");
 		if (target_ft_long_rd_id == 0) {
@@ -536,6 +446,8 @@ int main(void)
 			k_sleep(K_SECONDS(10));
     	}
 	}
+
+	k_sleep(K_SECONDS(2));
     
 	err = associate_with_ft(target_ft_long_rd_id);
     if (err) {
@@ -546,6 +458,9 @@ int main(void)
 	print_association_status();
 
 	k_sleep(K_SECONDS(2));
+
+	/* Transmit data */
+
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
 
