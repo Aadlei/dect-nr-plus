@@ -1,3 +1,4 @@
+import paho.mqtt.client as mqtt
 import serial
 import time
 import json
@@ -60,7 +61,7 @@ if __name__ == '__main__':
                     print(f"   Time: {time.strftime('%H:%M:%S', time.localtime(structured_data['timestamp']))}")
                     print("-" * 40)
 
-            time.sleep(0.1)
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("Exiting...")
     finally:
