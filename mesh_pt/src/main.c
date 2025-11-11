@@ -239,7 +239,7 @@ int scan_for_ft_beacons(void)
     desh_print("Beacon scan started. Waiting for results...");
     
     // Wait for scan to complete
-    // k_sleep(K_SECONDS(params.duration_secs + 5));
+    k_sleep(K_SECONDS(params.duration_secs + 5));
     
     return 0;
 }
@@ -414,6 +414,7 @@ int main(void)
 	desh_print("\n");
 
 
+	/* SCANNING */
 
 	uint32_t target_ft_long_rd_id = 0;
 
@@ -425,8 +426,6 @@ int main(void)
 			desh_error("Failed to scan for FT beacons, err %d", err);
 			return 0;
 		}
-
-		k_sleep(K_SECONDS(10));
 
 		desh_print("\n=== Discovered FT Devices ===");
 			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
@@ -450,6 +449,9 @@ int main(void)
 	}
 
 	k_sleep(K_SECONDS(2));
+
+
+	/* ASSOCIATION */
     
 	err = associate_with_ft(target_ft_long_rd_id);
     if (err) {
@@ -461,7 +463,8 @@ int main(void)
 
 	k_sleep(K_SECONDS(2));
 
-	/* Transmit data */
+
+	/* TRANSMIT DATA */
 
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
