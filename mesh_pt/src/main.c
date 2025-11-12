@@ -428,10 +428,12 @@ int main(void)
 		}
 
 		desh_print("\n=== Discovered FT Devices ===");
+			bool device_found = false;
+
 			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
 				if (!(ptr_nbrs+i)->reserved)
 				{
-					desh_error("No FT devices found! Retrying...");
+					device_found = true;
 					continue;
 				} 
 				
@@ -440,6 +442,9 @@ int main(void)
 				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
 				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);	
 			}
+
+			if (device_found) desh_error("No FT devices found! Retrying...");
+
 			desh_print("=============================\n");
 	}
 
