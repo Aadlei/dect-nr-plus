@@ -217,14 +217,13 @@ static struct pt_association_info my_association = {
     .channel = 0
 };
 
-// Scan for scan duration seconds. Whole thread sleeps for 2 * scan duration seconds
-int scan_for_ft_beacons(uint32_t scan_duration_secs)
+int scan_for_ft_beacons(void)
 {
     desh_print("Starting beacon scan to find FT devices...");
     
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
-        .duration_secs = scan_duration_secs,
+        .duration_secs = 4,
         .channel = 1665,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
         .clear_nbr_cache_before_scan = 1,
@@ -240,7 +239,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     desh_print("Beacon scan started. Waiting for results...");
     
     // Wait for scan to complete
-    k_sleep(K_SECONDS(params.duration_secs * 2));
+    k_sleep(K_SECONDS(params.duration_secs + 5));
     
     return 0;
 }
@@ -391,14 +390,16 @@ int main(void)
 	#endif
 
 	/* Important structs for the running device */
-	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
+	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Neighbor list
 	struct dect_phy_settings current_settings; // The device settings
+
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 9876; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 9876; // Just a random value
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
+
 
 	/* Print current settings */
 	desh_print("Common settings:");
@@ -412,15 +413,14 @@ int main(void)
 		   current_settings.common.band_nbr);
 	desh_print("\n");
 
-	/* SCAN */
-	// Fix this setup, kinda trash
-	uint32_t scan_duration_secs_once = 3;
-	uint32_t scan_duration_secs_complete = 30;
-	uint32_t no_tries = scan_duration_secs_complete / (scan_duration_secs_once * 2);
 
-	for(int i = 0; i < no_tries; i++)
-	{
-		err = scan_for_ft_beacons(scan_duration_secs_once);
+	/* SCANNING */
+
+	uint32_t target_ft_long_rd_id = 0;
+
+	// While no FT found, keep scanning
+	while(target_ft_long_rd_id == 0) {
+		err = scan_for_ft_beacons();
 		if (err) 
 		{
 			desh_error("Failed to scan for FT beacons, err %d", err);
@@ -429,26 +429,31 @@ int main(void)
 
 		desh_print("\n=== Discovered FT Devices ===");
 			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				if (!(ptr_nbrs+i)->reserved)
-				{
-					desh_error("No FT devices found! Retrying...");
-					continue;
-				} 
+				if (!(ptr_nbrs+i)->reserved) continue; 
 				
 				desh_print("FT #%d:", i + 1);
 				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
 				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);	
+				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+				
+				// Use first discovered FT
+				if (target_ft_long_rd_id == 0) {
+					target_ft_long_rd_id = (ptr_nbrs + i)->long_rd_id;
+				}
+				
 			}
 			desh_print("=============================\n");
+		if (target_ft_long_rd_id == 0) {
+        	desh_error("No FT devices found! Retrying...");
+    	}
 	}
 
 	k_sleep(K_SECONDS(2));
 
 
 	/* ASSOCIATION */
-	/*
-	err = associate_with_ft(3);
+    
+	err = associate_with_ft(target_ft_long_rd_id);
     if (err) {
         desh_error("Association failed");
         return 0;
@@ -460,7 +465,7 @@ int main(void)
 
 
 	/* TRANSMIT DATA */
-	/*
+
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
 
@@ -485,12 +490,6 @@ int main(void)
             print_association_status();
             dect_phy_mac_client_status_print();
         }
-    }*/
-
-	while(1)
-	{
-		k_sleep(K_SECONDS(1));
-	}
-
+    }
 	return 0;
 }
