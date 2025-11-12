@@ -225,7 +225,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
         .duration_secs = scan_duration_secs,
-        .channel = 1665,  // Or 0 to scan all channels
+        .channel = 0,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
         .clear_nbr_cache_before_scan = 1,
         .suspend_scheduler = 1,
@@ -393,6 +393,7 @@ int main(void)
 	/* Important structs for the running device */
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
+	int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
@@ -413,7 +414,7 @@ int main(void)
 	desh_print("\n");
 
 	/* SCAN */
-	// Fix this setup, kinda trash
+	// Maybe fix this setup here
 	uint32_t scan_duration_secs_once = 3;
 	uint32_t scan_duration_secs_complete = 30;
 	uint32_t no_tries = scan_duration_secs_complete / (scan_duration_secs_once * 2);
