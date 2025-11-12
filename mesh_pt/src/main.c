@@ -201,6 +201,22 @@ static void desh_print_reset_reason(void)
 }
 */
 
+enum band_1_channels
+{
+	c1657,
+	c1659,
+	c1661,
+	c1663,
+	c1665,
+	c1667,
+	c1669,
+	c1671,
+	c1673,
+	c1675,
+	c1677,
+	no_channels
+};
+
 struct pt_association_info {
     bool is_associated;
     uint32_t ft_long_rd_id;
@@ -245,8 +261,10 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     return 0;
 }
 
-int find_best_association_by_longid(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
+uint32_t find_best_association_by_longid(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
 {
+	// Currently only picks the best RSSI. Should also sort them based on above/below threshold and hop count
+
 	struct dect_phy_mac_nbr_info_list_item *ptr_best_nbr = NULL;
 
 	bool has_neighbors = false;
@@ -263,12 +281,12 @@ int find_best_association_by_longid(struct dect_phy_mac_nbr_info_list_item *ptr_
 		if ((ptr_nbrs+i)->rssi_2 > ptr_best_nbr->rssi_2) ptr_best_nbr = ptr_nbrs+i;
 	}
 
-	if (!has_neighbors) return -1;
+	if (!has_neighbors) return 0;
 
 	return ptr_best_nbr->long_rd_id;
 }
 
-int associate_with_ft(uint32_t target_ft_long_rd_id)
+int associate_with_ft(uint32_t target_ft_long_rd_id, uint16_t *ft_channel)
 {
     desh_print("Attempting to associate with FT (long_rd_id=%u)...", target_ft_long_rd_id);
     
@@ -280,6 +298,8 @@ int associate_with_ft(uint32_t target_ft_long_rd_id)
         desh_error("FT with long_rd_id=%u not found in scan results", target_ft_long_rd_id);
         return -EINVAL;
     }
+
+	*ft_channel = ft_info->channel; // Store the channel for this association to increment for RDs next beacon scan
     
     // Store FT information for later use
     my_association.ft_long_rd_id = ft_info->long_rd_id;
@@ -436,7 +456,7 @@ int main(void)
 		   current_settings.common.band_nbr);
 	desh_print("\n");
 
-	/* SCAN */
+	/* BEACON SCAN */
 	// Maybe fix this setup here
 	uint32_t scan_duration_secs_once = 3;
 	uint32_t scan_duration_secs_complete = 30;
@@ -477,8 +497,13 @@ int main(void)
 
 
 	/* ASSOCIATION */
+
+	uint32_t target_long_rd_id = find_best_association_by_longid(ptr_nbrs);
+	if (target_long_rd_id == 0) goto end_of_life; // If no neighbors, we just skip. TODO: Go back to scanning
+
+	uint16_t *current_assoc_channel = NULL;
 	
-	err = associate_with_ft(3);
+	err = associate_with_ft(target_long_rd_id, current_assoc_channel);
     if (err) {
         desh_error("Association failed");
         return 0;
@@ -487,6 +512,11 @@ int main(void)
 	print_association_status();
 
 	k_sleep(K_SECONDS(2));
+
+
+	/* BEACON START */
+	
+
 
 
 	/* TRANSMIT DATA */
@@ -516,7 +546,8 @@ int main(void)
             dect_phy_mac_client_status_print();
         }
     }*/
-
+end_of_life:
+	desh_print("End of RD operation.");
 	while(1)
 	{
 		k_sleep(K_SECONDS(1));
