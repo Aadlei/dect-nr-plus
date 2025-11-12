@@ -515,11 +515,24 @@ int main(void)
 
 
 	/* BEACON START */
-	
+	struct dect_phy_mac_beacon_start_params params =
+	{
+		.tx_power_dbm = 0,
+		.beacon_channel = 1665,
+	};
 
+	int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+	printk("Beacon returned: %d\n", ret);
+	if (ret) {
+		printk("Cannot start beacon, err %d", ret);
+	} else {
+		printk("Beacon starting");
+	}
 
 
 	/* TRANSMIT DATA */
+	
+
 	/*
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
@@ -546,6 +559,7 @@ int main(void)
             dect_phy_mac_client_status_print();
         }
     }*/
+
 end_of_life:
 	desh_print("End of RD operation.");
 	while(1)
