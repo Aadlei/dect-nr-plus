@@ -225,7 +225,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
         .duration_secs = scan_duration_secs,
-        .channel = 0,  // Or 0 to scan all channels
+        .channel = 1665,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
         .clear_nbr_cache_before_scan = 1,
         .suspend_scheduler = 1,
@@ -393,11 +393,11 @@ int main(void)
 	/* Important structs for the running device */
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
-	int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
+	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 9876; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
@@ -441,7 +441,8 @@ int main(void)
 				desh_print("FT #%d:", i + 1);
 				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
 				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);	
+				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+				desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
 			}
 
 			if (!device_found) desh_error("No FT devices found! Retrying...");
@@ -465,7 +466,7 @@ int main(void)
 	k_sleep(K_SECONDS(2));
 
 
-	/* TRANSMIT DATA */
+	TRANSMIT DATA */
 	/*
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];

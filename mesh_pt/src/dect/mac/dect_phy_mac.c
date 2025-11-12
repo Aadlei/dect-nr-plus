@@ -455,6 +455,7 @@ bool dect_phy_mac_handle(struct dect_phy_commmon_op_pdc_rcv_params *rcv_params)
 				common_header.transmitter_id,
 				rcv_params->last_received_pcc_transmitter_short_rd_id, beacon_msg,
 				ra_ie, /* Note: storing only the last RA IE */
+				p_rx_status->rssi_2, // Custom shit. IMPORTANT: NOT NORDIC'S AND THIS IS AN ILLEGAL MIX OF PHY AND MAC
 				print);
 		}
 		if (association_resp != NULL) {
