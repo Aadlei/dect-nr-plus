@@ -245,6 +245,29 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     return 0;
 }
 
+int find_best_association_by_longid(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
+{
+	struct dect_phy_mac_nbr_info_list_item *ptr_best_nbr = NULL;
+
+	bool has_neighbors = false;
+
+	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++)
+	{
+		if (!(ptr_nbrs+i)->reserved && !has_neighbors)
+		{
+			has_neighbors = true;
+			ptr_best_nbr = ptr_nbrs+i;
+			continue;
+		}
+
+		if ((ptr_nbrs+i)->rssi_2 > ptr_best_nbr->rssi_2) ptr_best_nbr = ptr_nbrs+i;
+	}
+
+	if (!has_neighbors) return -1;
+
+	return ptr_best_nbr->long_rd_id;
+}
+
 int associate_with_ft(uint32_t target_ft_long_rd_id)
 {
     desh_print("Attempting to associate with FT (long_rd_id=%u)...", target_ft_long_rd_id);
@@ -454,7 +477,7 @@ int main(void)
 
 
 	/* ASSOCIATION */
-	/*
+	
 	err = associate_with_ft(3);
     if (err) {
         desh_error("Association failed");
@@ -466,7 +489,7 @@ int main(void)
 	k_sleep(K_SECONDS(2));
 
 
-	TRANSMIT DATA */
+	/* TRANSMIT DATA */
 	/*
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
