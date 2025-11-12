@@ -443,7 +443,7 @@ int main(void)
 				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);	
 			}
 
-			if (device_found) desh_error("No FT devices found! Retrying...");
+			if (!device_found) desh_error("No FT devices found! Retrying...");
 
 			desh_print("=============================\n");
 	}
