@@ -80,6 +80,21 @@ struct k_work_q desh_common_work_q;
 #error "Unsupported board: sw3 devicetree alias is not defined"
 #endif
 
+static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
+static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET(SW1_NODE, gpios);
+static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET(SW2_NODE, gpios);
+static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET(SW3_NODE, gpios);
+
+static struct gpio_callback button_1_cb_data;
+static struct gpio_callback button_2_cb_data;
+static struct gpio_callback button_3_cb_data;
+static struct gpio_callback button_4_cb_data;
+
+
+static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
+static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
+
+
 /* Global variables */
 const struct shell *desh_shell;
 static uint16_t device_id;
@@ -150,81 +165,19 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
+static struct k_work button_1_work;
 
-/*
-static void reset_reason_str_get(char *str, uint32_t reason)
+static void button_1_work_handler(struct k_work *work)
 {
-	size_t len;
-
-	*str = '\0';
-
-	if (reason & NRFX_RESET_REASON_RESETPIN_MASK) {
-		(void)strcat(str, "PIN reset | ");
-	}
-	if (reason & NRFX_RESET_REASON_DOG_MASK) {
-		(void)strcat(str, "watchdog | ");
-	}
-	if (reason & NRFX_RESET_REASON_OFF_MASK) {
-		(void)strcat(str, "wakeup from power-off | ");
-	}
-	if (reason & NRFX_RESET_REASON_DIF_MASK) {
-		(void)strcat(str, "debug interface wakeup | ");
-	}
-	if (reason & NRFX_RESET_REASON_SREQ_MASK) {
-		(void)strcat(str, "software | ");
-	}
-	if (reason & NRFX_RESET_REASON_LOCKUP_MASK) {
-		(void)strcat(str, "CPU lockup | ");
-	}
-	if (reason & NRFX_RESET_REASON_CTRLAP_MASK) {
-		(void)strcat(str, "control access port | ");
-	}
-
-	len = strlen(str);
-	if (len == 0) {
-		(void)strcpy(str, "power-on reset");
-	} else {
-		str[len - 3] = '\0';
-	}
+    desh_print("dect-phy-mac status:");
+    dect_phy_mac_cluster_beacon_status_print();
+    dect_phy_mac_client_status_print();
+    dect_phy_mac_nbr_status_print();
 }
-
-static void desh_print_reset_reason(void)
-{
-	uint32_t reset_reason;
-	char reset_reason_str[128];
-
-	// Read RESETREAS register value and clear current reset reason(s).
-	reset_reason = nrfx_reset_reason_get();
-	nrfx_reset_reason_clear(reset_reason);
-
-	reset_reason_str_get(reset_reason_str, reset_reason);
-
-	printk("\nReset reason: %s\n", reset_reason_str);
-}
-*/
-
-/* Button crap */
-// Button 1: 
-// Button 2:
-// Button 3:
-// Button 4:
-
-static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
-static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
-static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0});
-static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
-
-static struct gpio_callback button_1_cb_data;
-static struct gpio_callback button_2_cb_data;
-static struct gpio_callback button_3_cb_data;
-static struct gpio_callback button_4_cb_data;
-
-static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
-static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
 
 void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	printk("Button 1 pressed\n");
+	k_work_submit(&button_1_work);
 }
 
 void button_2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -316,6 +269,8 @@ int main(void)
 		gpio_add_callback(ptr_buttons[i]->port, ptr_buttons_cb_data[i]);
 		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
 	}
+
+	k_work_init(&button_1_work, button_1_work_handler);
 
 	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
