@@ -4,4 +4,8 @@
 .vscode/
 
 # build
+*build/
 build/
+
+# JetBrains
+.idea/
