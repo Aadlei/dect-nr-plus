@@ -261,33 +261,41 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     return 0;
 }
 
-uint32_t find_best_association_by_longid(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
+// Loop through neighbors and store the best candidate to association pointer.
+struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
 {
+	desh_print("Here?");
+
 	// Currently only picks the best RSSI. Should also sort them based on above/below threshold and hop count
+	struct dect_phy_mac_nbr_info_list_item *best_assoc_nbr = NULL;
 
-	struct dect_phy_mac_nbr_info_list_item *ptr_best_nbr = NULL;
-
-	bool has_neighbors = false;
+	desh_print("Here1?");
 
 	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++)
 	{
-		if (!(ptr_nbrs+i)->reserved && !has_neighbors)
+		desh_print("Here2?");
+
+		if (!(ptr_nbrs+i)->reserved && !best_assoc_nbr)
 		{
-			has_neighbors = true;
-			ptr_best_nbr = ptr_nbrs+i;
+			best_assoc_nbr = ptr_nbrs+i;
 			continue;
 		}
 
-		if ((ptr_nbrs+i)->rssi_2 > ptr_best_nbr->rssi_2) ptr_best_nbr = ptr_nbrs+i;
+		desh_print("Here3?");
+
+		if ((ptr_nbrs+i)->rssi_2 > best_assoc_nbr->rssi_2)
+			best_assoc_nbr = ptr_nbrs+i;
 	}
 
-	if (!has_neighbors) return 0;
+	desh_print("Here4?");
 
-	return ptr_best_nbr->long_rd_id;
+	return best_assoc_nbr;
 }
 
-int associate_with_ft(uint32_t target_ft_long_rd_id, uint16_t *ft_channel)
+int associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_t *ft_channel)
 {
+	uint32_t target_ft_long_rd_id = assoc_nbr->long_rd_id;
+
     desh_print("Attempting to associate with FT (long_rd_id=%u)...", target_ft_long_rd_id);
     
     // Get the neighbor info from scan results
@@ -437,6 +445,7 @@ int main(void)
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
 	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
+	struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
@@ -495,15 +504,18 @@ int main(void)
 
 	k_sleep(K_SECONDS(2));
 
-
 	/* ASSOCIATION */
+	ptr_assoc_nbr = find_best_association(ptr_nbrs); // assoc_nbr now points to the associated neigbor in neighbor list
 
-	uint32_t target_long_rd_id = find_best_association_by_longid(ptr_nbrs);
-	if (target_long_rd_id == 0) goto end_of_life; // If no neighbors, we just skip. TODO: Go back to scanning
+	if (!ptr_assoc_nbr)
+	{
+		desh_print("Something wrong!");
+		goto end_of_life; // If no neighbors, no association, so we just skip. TODO: Go back to scanning
+	}
 
 	uint16_t *current_assoc_channel = NULL;
 	
-	err = associate_with_ft(target_long_rd_id, current_assoc_channel);
+	err = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
     if (err) {
         desh_error("Association failed");
         return 0;
@@ -515,6 +527,7 @@ int main(void)
 
 
 	/* BEACON START */
+	// TODO: Start beacon on an incremented channel
 	struct dect_phy_mac_beacon_start_params params =
 	{
 		.tx_power_dbm = 0,
@@ -531,7 +544,7 @@ int main(void)
 
 
 	/* TRANSMIT DATA */
-	
+
 
 	/*
 	int counter = 0;
