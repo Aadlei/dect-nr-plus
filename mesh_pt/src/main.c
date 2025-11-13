@@ -264,30 +264,22 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
 // Loop through neighbors and store the best candidate to association pointer.
 struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
 {
-	desh_print("Here?");
-
 	// Currently only picks the best RSSI. Should also sort them based on above/below threshold and hop count
 	struct dect_phy_mac_nbr_info_list_item *best_assoc_nbr = NULL;
 
-	desh_print("Here1?");
-
 	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++)
 	{
-		desh_print("Here2?");
+		if (!(ptr_nbrs+i)->reserved) continue;
 
-		if (!(ptr_nbrs+i)->reserved && !best_assoc_nbr)
+		if (!best_assoc_nbr)
 		{
-			best_assoc_nbr = ptr_nbrs+i;
+			best_assoc_nbr = ptr_nbrs + i;
 			continue;
 		}
-
-		desh_print("Here3?");
 
 		if ((ptr_nbrs+i)->rssi_2 > best_assoc_nbr->rssi_2)
 			best_assoc_nbr = ptr_nbrs+i;
 	}
-
-	desh_print("Here4?");
 
 	return best_assoc_nbr;
 }
@@ -296,7 +288,7 @@ int associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_
 {
 	uint32_t target_ft_long_rd_id = assoc_nbr->long_rd_id;
 
-    desh_print("Attempting to associate with FT (long_rd_id=%u)...", target_ft_long_rd_id);
+    desh_print("Attempting to associate with FT (Long RD ID = %u)...", target_ft_long_rd_id);
     
     // Get the neighbor info from scan results
     struct dect_phy_mac_nbr_info_list_item *ft_info = 
@@ -505,16 +497,20 @@ int main(void)
 	k_sleep(K_SECONDS(2));
 
 	/* ASSOCIATION */
+	desh_print("=== Finding Best Association Neighbor ===");
 	ptr_assoc_nbr = find_best_association(ptr_nbrs); // assoc_nbr now points to the associated neigbor in neighbor list
 
 	if (!ptr_assoc_nbr)
 	{
-		desh_print("Something wrong!");
+		desh_print("No association neighbors found!");
 		goto end_of_life; // If no neighbors, no association, so we just skip. TODO: Go back to scanning
 	}
 
+	desh_print("Found best neighbor with long RD ID: %d", ptr_assoc_nbr->long_rd_id);
+
 	uint16_t *current_assoc_channel = NULL;
 	
+	desh_print("\n=== Association Process ===");
 	err = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
     if (err) {
         desh_error("Association failed");
