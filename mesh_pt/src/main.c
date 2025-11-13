@@ -59,27 +59,6 @@ K_THREAD_STACK_DEFINE(desh_common_workq_stack, DESH_COMMON_WORKQUEUE_STACK_SIZE)
 struct k_work_q desh_common_work_q;
 #endif
 
-/* Button definition */
-#define SW0_NODE	DT_ALIAS(sw0)
-#if !DT_NODE_HAS_STATUS_OKAY(SW0_NODE)
-#error "Unsupported board: sw0 devicetree alias is not defined"
-#endif
-
-#define SW1_NODE	DT_ALIAS(sw1)
-#if !DT_NODE_HAS_STATUS_OKAY(SW1_NODE)
-#error "Unsupported board: sw1 devicetree alias is not defined"
-#endif
-
-#define SW2_NODE	DT_ALIAS(sw2)
-#if !DT_NODE_HAS_STATUS_OKAY(SW2_NODE)
-#error "Unsupported board: sw2 devicetree alias is not defined"
-#endif
-
-#define SW3_NODE	DT_ALIAS(sw3)
-#if !DT_NODE_HAS_STATUS_OKAY(SW3_NODE)
-#error "Unsupported board: sw3 devicetree alias is not defined"
-#endif
-
 /* Global variables */
 const struct shell *desh_shell;
 
@@ -217,22 +196,6 @@ enum band_1_channels
 	no_channels
 };
 
-struct pt_association_info {
-    bool is_associated;
-    uint32_t ft_long_rd_id;
-    uint16_t ft_short_rd_id;
-    uint32_t network_id;
-    uint16_t channel;
-};
-
-static struct pt_association_info my_association = {
-    .is_associated = false,
-    .ft_long_rd_id = 0,
-    .ft_short_rd_id = 0,
-    .network_id = 0,
-    .channel = 0
-};
-
 // Scan for scan duration seconds. Whole thread sleeps for 2 * scan duration seconds
 int scan_for_ft_beacons(uint32_t scan_duration_secs)
 {
@@ -284,40 +247,30 @@ struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_ma
 	return best_assoc_nbr;
 }
 
-int associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_t *ft_channel)
+bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_t *ft_channel) // ft_channel must be pointer pointer
 {
-	uint32_t target_ft_long_rd_id = assoc_nbr->long_rd_id;
-
-    desh_print("Attempting to associate with FT (Long RD ID = %u)...", target_ft_long_rd_id);
+    desh_print("Attempting to associate with FT (Long RD ID = %u)...", assoc_nbr->long_rd_id);
     
-    // Get the neighbor info from scan results
-    struct dect_phy_mac_nbr_info_list_item *ft_info = 
-        dect_phy_mac_nbr_info_get_by_long_rd_id(target_ft_long_rd_id);
-    
-    if (!ft_info) {
-        desh_error("FT with long_rd_id=%u not found in scan results", target_ft_long_rd_id);
+    if (!assoc_nbr) {
+        desh_error("FT not found in scan results");
         return -EINVAL;
     }
-
-	*ft_channel = ft_info->channel; // Store the channel for this association to increment for RDs next beacon scan
+	
+	uint32_t target_long_rd_id = assoc_nbr->long_rd_id;
+	// *ft_channel = assoc_nbr->channel; // Store the channel for this association to increment for RDs next beacon scan
+	// This line is buggy
     
-    // Store FT information for later use
-    my_association.ft_long_rd_id = ft_info->long_rd_id;
-    my_association.ft_short_rd_id = ft_info->short_rd_id;
-    my_association.network_id = ft_info->nw_id_32bit;
-    my_association.channel = ft_info->channel;
-    
-    desh_print("FT found:");
-    desh_print("  Long RD ID: %u", ft_info->long_rd_id);
-    desh_print("  Short RD ID: %u", ft_info->short_rd_id);
-    desh_print("  Network ID: %u (0x%08x)", ft_info->nw_id_32bit, ft_info->nw_id_32bit);
-    desh_print("  Channel: %u", ft_info->channel);
+    desh_print("FT, for association:");
+    desh_print("  Long RD ID: %u", assoc_nbr->long_rd_id);
+    desh_print("  Short RD ID: %u", assoc_nbr->short_rd_id);
+    desh_print("  Network ID: %u (0x%08x)", assoc_nbr->nw_id_32bit, assoc_nbr->nw_id_32bit);
+    desh_print("  Channel: %u", assoc_nbr->channel);
     
     // Prepare association parameters
     struct dect_phy_mac_associate_params assoc_params = {
         .tx_power_dbm = 0,
         .mcs = 0,  // MCS 0 is most robust
-        .target_long_rd_id = target_ft_long_rd_id,
+        .target_long_rd_id = target_long_rd_id,
     };
     
     // Send association request
@@ -333,20 +286,19 @@ int associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_
     k_sleep(K_SECONDS(15));
     
     // Check if we're now associated
-    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(
-        my_association.ft_short_rd_id);
+    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(assoc_nbr->short_rd_id);
     
-    if (is_associated) {
-        my_association.is_associated = true;
+    if (is_associated)
+	{
         desh_print("Successfully associated with FT!");
-        return 0;
-    } else {
-        desh_error("Association failed or timed out");
-        my_association.is_associated = false;
-        return -ETIMEDOUT;
+        return true;
     }
+	
+	desh_error("Association failed or timed out");
+	return false;
+    
 }
-
+/*
 int send_data_to_ft(const char *data)
 {
     if (!my_association.is_associated) {
@@ -391,10 +343,10 @@ int send_data_to_ft(const char *data)
     return 0;
 }
 
-void print_association_status(void)
+void print_association_status(, bool is_associated)
 {
     desh_print("\n=== PT Association Status ===");
-    if (my_association.is_associated) {
+    if (is_associated) {
         desh_print("Status: ASSOCIATED");
         desh_print("FT Long RD ID: %u", my_association.ft_long_rd_id);
         desh_print("FT Short RD ID: %u", my_association.ft_short_rd_id);
@@ -405,7 +357,7 @@ void print_association_status(void)
         desh_print("Status: NOT ASSOCIATED");
     }
     desh_print("============================\n");
-}
+}*/
 
 int main(void)
 {
@@ -437,7 +389,9 @@ int main(void)
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
 	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
+
 	struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+	bool is_ft_associated = false;
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
@@ -511,13 +465,13 @@ int main(void)
 	uint16_t *current_assoc_channel = NULL;
 	
 	desh_print("\n=== Association Process ===");
-	err = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
-    if (err) {
+	bool association_status = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
+    if (!association_status) {
         desh_error("Association failed");
         return 0;
     }
 
-	print_association_status();
+	// print_association_status();
 
 	k_sleep(K_SECONDS(2));
 
