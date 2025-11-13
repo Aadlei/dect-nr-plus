@@ -34,6 +34,8 @@
 #include "dect_app_time.h"
 #include "dect_phy_mac_nbr_bg_scan.h"
 
+#include <dect_phy_mac.h>
+
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
 
@@ -50,7 +52,6 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_SHELL_BACKEND_SERIAL),
 	     "CONFIG_SHELL_BACKEND_SERIAL shell backend must be enabled");
 
 /***** Work queue and work item definitions *****/
-
 #if defined(CONFIG_DESH_STARTUP_CMDS)
 #define DESH_COMMON_WORKQUEUE_STACK_SIZE 4096
 #define DESH_COMMON_WORKQ_PRIORITY 5
@@ -82,6 +83,7 @@ struct k_work_q desh_common_work_q;
 /* Global variables */
 const struct shell *desh_shell;
 static uint16_t device_id;
+bool beacon_started = false;
 
 char desh_at_resp_buf[DESH_AT_CMD_RESPONSE_MAX_LEN];
 K_MUTEX_DEFINE(desh_at_resp_buf_mutex);
@@ -245,6 +247,42 @@ static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio
 	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
 };
 
+static void data_received_handler(const uint8_t *data, uint32_t length)
+{
+    char received_str[DECT_DATA_MAX_LEN];
+    
+    // Copy to null-terminated string
+    uint32_t copy_len = MIN(length, DECT_DATA_MAX_LEN - 1);
+    memcpy(received_str, data, copy_len);
+    received_str[copy_len] = '\0';
+    
+    printk("\n*** CALLBACK: Received data ***\n");
+    printk("Length: %u\n", length);
+    printk("Data: %s\n", received_str);
+    
+    // Parse JSON if needed
+    char *data_start = strstr(received_str, "\"data\":\"");
+    if (data_start) {
+        data_start += 8; // Skip past "data":"
+        char *data_end = strchr(data_start, '"');
+        if (data_end) {
+            *data_end = '\0';
+            printk("Parsed message: %s\n", data_start);
+        }
+    }
+    
+    char *temp_start = strstr(received_str, "\"m_tmp\":\"");
+    if (temp_start) {
+        temp_start += 9; // Skip past "m_tmp":"
+        char *temp_end = strchr(temp_start, '"');
+        if (temp_end) {
+            *temp_end = '\0';
+            printk("Temperature: %s°C\n", temp_start);
+        }
+    }
+    printk("*******************************\n\n");
+}
+
 int main(void)
 {
 	int err;
@@ -304,19 +342,32 @@ int main(void)
 	hwinfo_get_device_id((void *)&device_id, sizeof(device_id));
 	printk("DECT NR+ Started. Device id: %u\n", device_id);
 
+	
+	struct dect_phy_settings current_settings; // The device settings
+	dect_common_settings_read(&current_settings);
+	printk("Current transmitter id (long RD ID): %u\n",
+	       current_settings.common.transmitter_id);
+	printk("Current band number: %d\n", current_settings.common.band_nbr);
+	printk("Network id: %u\n", current_settings.common.network_id);
+  
 	while(1) {
-		struct dect_phy_mac_beacon_start_params params = {
-			.tx_power_dbm = 0,
-			.beacon_channel = 1665,
-		};
-		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-		printk("Beacon returned: %d\n", ret);
-		if (ret) {
-			printk("Cannot start beacon, err %d", ret);
-		} else {
-			printk("Beacon starting");
+		if(!beacon_started) {		
+			struct dect_phy_mac_beacon_start_params params = {
+				.tx_power_dbm = 0,
+				.beacon_channel = 1665,
+			};
+			int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+			printk("Beacon returned: %d\n", ret);
+			if (ret) {
+				printk("Cannot start beacon, err %d", ret);
+			} else {
+				printk("Beacon starting");
+				beacon_started = true;
+				dect_phy_mac_register_data_callback(data_received_handler);
+			}
 		}
 
+		printk("Sleeping for 30 seconds...\n");
 		k_sleep(K_SECONDS(30));
 	}
 
