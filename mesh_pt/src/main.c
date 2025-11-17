@@ -477,25 +477,33 @@ int main(void)
 
 
 	/* BEACON START */
-	// TODO: Start beacon on an incremented channel
-	struct dect_phy_mac_beacon_start_params params =
-	{
-		.tx_power_dbm = 0,
-		.beacon_channel = 1665,
-	};
+	bool beacon_started = false;
+	int beacon_tries = 5;
 
-	int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-	printk("Beacon returned: %d\n", ret);
-	if (ret) {
-		printk("Cannot start beacon, err %d", ret);
-	} else {
-		printk("Beacon starting");
+	for(int i = 0; i < beacon_tries; i++)
+	{
+		if(!beacon_started) {		
+			struct dect_phy_mac_beacon_start_params params =
+			{
+				.tx_power_dbm = 0,
+				.beacon_channel = 0,
+			};
+			int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+			printk("Beacon returned: %d\n", ret);
+			if (ret) {
+				printk("Cannot start beacon, err %d", ret);
+			} else {
+				printk("Beacon starting");
+				beacon_started = true;
+			}
+		}
+
+		printk("Sleeping for 30 seconds...\n");
+		k_sleep(K_SECONDS(30));
 	}
 
 
 	/* TRANSMIT DATA */
-
-
 	/*
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
