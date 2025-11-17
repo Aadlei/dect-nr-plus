@@ -204,7 +204,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
         .duration_secs = scan_duration_secs,
-        .channel = 1665,  // Or 0 to scan all channels
+        .channel = 0,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
         .clear_nbr_cache_before_scan = 1,
         .suspend_scheduler = 1,
@@ -342,22 +342,7 @@ int send_data_to_ft(const char *data)
     
     return 0;
 }
-
-void print_association_status(, bool is_associated)
-{
-    desh_print("\n=== PT Association Status ===");
-    if (is_associated) {
-        desh_print("Status: ASSOCIATED");
-        desh_print("FT Long RD ID: %u", my_association.ft_long_rd_id);
-        desh_print("FT Short RD ID: %u", my_association.ft_short_rd_id);
-        desh_print("Network ID: %u (0x%08x)", 
-                   my_association.network_id, my_association.network_id);
-        desh_print("Channel: %u", my_association.channel);
-    } else {
-        desh_print("Status: NOT ASSOCIATED");
-    }
-    desh_print("============================\n");
-}*/
+*/
 
 int main(void)
 {
@@ -413,13 +398,17 @@ int main(void)
 
 	/* BEACON SCAN */
 	// Maybe fix this setup here
-	uint32_t scan_duration_secs_once = 3;
-	uint32_t scan_duration_secs_complete = 30;
-	uint32_t no_tries = scan_duration_secs_complete / (scan_duration_secs_once * 2);
+	uint32_t no_channels_in_band = 11;
+	uint32_t scan_duration_channel = 1;
+	uint32_t scan_duration_all = 
+		no_channels_in_band * scan_duration_channel + 5; // Extra margin
+	uint32_t no_scans = 5;
 
-	for(int i = 0; i < no_tries; i++)
+	for(int i = 0; i < no_scans; i++)
 	{
-		err = scan_for_ft_beacons(scan_duration_secs_once);
+		err = scan_for_ft_beacons(scan_duration_channel);
+		k_sleep(K_SECONDS(scan_duration_all));
+
 		if (err) 
 		{
 			desh_error("Failed to scan for FT beacons, err %d", err);
