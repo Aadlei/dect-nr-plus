@@ -343,8 +343,13 @@ int main(void)
 	printk("DECT NR+ Started. Device id: %u\n", device_id);
 
 	
+	/* Read and write current settings */
 	struct dect_phy_settings current_settings; // The device settings
 	dect_common_settings_read(&current_settings);
+	uint32_t long_rd_id = 9876; // Just a random value
+	current_settings.common.transmitter_id = long_rd_id;
+	dect_common_settings_write(&current_settings);
+
 	printk("Current transmitter id (long RD ID): %u\n",
 	       current_settings.common.transmitter_id);
 	printk("Current band number: %d\n", current_settings.common.band_nbr);
