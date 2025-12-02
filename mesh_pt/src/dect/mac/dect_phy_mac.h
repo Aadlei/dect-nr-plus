@@ -12,6 +12,8 @@
 #include "dect_phy_common.h"
 
 /******************************************************************************/
+/* Custom shit */
+void register_rx_callback(void (*cb)(dect_phy_mac_sdu_t));
 
 bool dect_phy_mac_handle(struct dect_phy_commmon_op_pdc_rcv_params *rcv_params);
 

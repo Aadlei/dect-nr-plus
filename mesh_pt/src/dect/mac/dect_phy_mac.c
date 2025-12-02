@@ -26,6 +26,11 @@
 
 /**************************************************************************************************/
 
+/* Custom shit */
+static void (*app_data_rx_callback)(dect_phy_mac_sdu_t sdu_data_item) = NULL;
+void register_rx_callback(void (*cb)(dect_phy_mac_sdu_t)) { app_data_rx_callback = cb; }
+
+
 static void dect_phy_mac_message_print(dect_phy_mac_message_type_t message_type,
 				       dect_phy_mac_message_t *message)
 {
@@ -445,7 +450,14 @@ bool dect_phy_mac_handle(struct dect_phy_commmon_op_pdc_rcv_params *rcv_params)
 			} else if (sdu_list_item->message_type ==
 				   DECT_PHY_MAC_MESSAGE_TYPE_ASSOCIATION_RESP) {
 				association_resp = &sdu_list_item->message.association_resp;
-			}
+
+			/* Custom shit */
+			} else if (sdu_list_item->message_type == 
+				   DECT_PHY_MAC_MESSAGE_TYPE_DATA_SDU) {
+				if (app_data_rx_callback != NULL) {
+					app_data_rx_callback(*sdu_list_item);
+				}
+				   }
 		}
 		/* If received cluster beacon with RA IE, store as a neighbor */
 		if (beacon_msg != NULL && ra_ie != NULL) {
@@ -458,6 +470,7 @@ bool dect_phy_mac_handle(struct dect_phy_commmon_op_pdc_rcv_params *rcv_params)
 				p_rx_status->rssi_2, // Custom shit. IMPORTANT: NOT NORDIC'S AND THIS IS AN ILLEGAL MIX OF PHY AND MAC
 				print);
 		}
+
 		if (association_resp != NULL) {
 			dect_phy_mac_client_associate_resp_handle(&common_header, association_resp);
 		}

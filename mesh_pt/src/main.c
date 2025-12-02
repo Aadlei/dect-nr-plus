@@ -28,7 +28,6 @@
 
 #include <dect_common.h>
 #include <dect_common_settings.h>
-#include <dect_phy_ctrl.h>
 #include <dect_phy_mac_common.h>
 #include <dect_phy_mac_ctrl.h>
 #include <dect_phy_mac_nbr.h>
@@ -36,6 +35,8 @@
 #include "dect_phy_mac_nbr_bg_scan.h"
 #include "dect_phy_mac_nbr.h"
 #include "dect_phy_mac_client.h"
+#include "dect_phy_mac.h"
+#include "dect_phy_ctrl.h"
 
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
@@ -300,6 +301,12 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
     
 }
 
+void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
+{
+	// TODO: Implementere dette
+	return;
+}
+
 int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
 {
     if (ptr_assoc_ft == NULL) {
@@ -364,9 +371,9 @@ int main(void)
 	/* Important structs for the running device */
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
-	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
-
 	struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+	bool ftpt_mode = true;
+	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
@@ -486,28 +493,38 @@ int main(void)
 		k_sleep(K_SECONDS(30));
 	}
 
+	// TODO: Hvis ikke noen association requests --> Endre ftpt_mode til false
 
-	/* TRANSMIT DATA */
-	int counter = 0;
-	char message[DECT_DATA_MAX_LEN];
+	// Temp løsning for å gjøre forskjell på PT og FTPT
 
-	while (1) {
-        // Send single message
-        snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
-        err = send_data_to_ft(message, ptr_assoc_nbr);
-        
-        if (err) {
-            desh_error("Failed to send data, err %d", err);
-            break;
-        }
-        
-        k_sleep(K_SECONDS(10));  // Send every 10 seconds
-        
-        // Optional: Print status every few iterations
-        if (counter % 5 == 0) {
-            dect_phy_mac_client_status_print();
-        }
-    }
+	if (ftpt_mode == true)
+	{
+		register_rx_callback(relay_pt_message); // Registers the local function as callback for whenever device receive pt data
+	}
+	else
+	{
+		/* TRANSMIT DATA */
+		int counter = 0;
+		char message[DECT_DATA_MAX_LEN];
+
+		while (1) {
+			// Send single message
+			snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
+			err = send_data_to_ft(message, ptr_assoc_nbr);
+			
+			if (err) {
+				desh_error("Failed to send data, err %d", err);
+				break;
+			}
+			
+			k_sleep(K_SECONDS(10));  // Send every 10 seconds
+			
+			// Optional: Print status every few iterations
+			if (counter % 5 == 0) {
+				dect_phy_mac_client_status_print();
+			}
+		}
+	}
 
 end_of_life:
 	desh_print("End of RD operation.");
