@@ -219,7 +219,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     desh_print("Beacon scan started. Waiting for results...");
     
     // Wait for scan to complete
-    k_sleep(K_SECONDS(params.duration_secs * 2));
+    //k_sleep(K_SECONDS(params.duration_secs * 2));
     
     return 0;
 }
@@ -401,13 +401,13 @@ int main(void)
 	uint32_t no_channels_in_band = 11;
 	uint32_t scan_duration_channel = 1;
 	uint32_t scan_duration_all = 
-		no_channels_in_band * scan_duration_channel + 5; // Extra margin
+		no_channels_in_band * scan_duration_channel;
 	uint32_t no_scans = 5;
 
 	for(int i = 0; i < no_scans; i++)
 	{
 		err = scan_for_ft_beacons(scan_duration_channel);
-		k_sleep(K_SECONDS(scan_duration_all));
+		k_sleep(K_SECONDS(scan_duration_all * 2));
 
 		if (err) 
 		{
@@ -478,16 +478,16 @@ int main(void)
 				.beacon_channel = 0,
 			};
 			int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-			printk("Beacon returned: %d\n", ret);
+			desh_print("Beacon returned: %d", ret);
 			if (ret) {
-				printk("Cannot start beacon, err %d", ret);
+				desh_print("Cannot start beacon, err %d", ret);
 			} else {
-				printk("Beacon starting");
+				desh_print("Beacon starting");
 				beacon_started = true;
 			}
 		}
 
-		printk("Sleeping for 30 seconds...\n");
+		desh_print("Sleeping for 30 seconds...");
 		k_sleep(K_SECONDS(30));
 	}
 
