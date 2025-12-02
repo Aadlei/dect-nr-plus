@@ -28,6 +28,7 @@
 
 #include <dect_common.h>
 #include <dect_common_settings.h>
+#include <dect_phy_ctrl.h>
 #include <dect_phy_mac_common.h>
 #include <dect_phy_mac_ctrl.h>
 #include <dect_phy_mac_nbr.h>
@@ -247,24 +248,24 @@ struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_ma
 	return best_assoc_nbr;
 }
 
-bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16_t *ft_channel) // ft_channel must be pointer pointer
+bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, uint16_t *ft_channel) // ft_channel must be pointer pointer
 {
-    desh_print("Attempting to associate with FT (Long RD ID = %u)...", assoc_nbr->long_rd_id);
+    desh_print("Attempting to associate with FT (Long RD ID = %u)...", ptr_assoc_nbr->long_rd_id);
     
-    if (!assoc_nbr) {
+    if (!ptr_assoc_nbr) {
         desh_error("FT not found in scan results");
         return -EINVAL;
     }
 	
-	uint32_t target_long_rd_id = assoc_nbr->long_rd_id;
-	// *ft_channel = assoc_nbr->channel; // Store the channel for this association to increment for RDs next beacon scan
+	uint32_t target_long_rd_id = ptr_assoc_nbr->long_rd_id;
+	// *ft_channel = ptr_assoc_nbr->channel; // Store the channel for this association to increment for RDs next beacon scan
 	// This line is buggy
     
     desh_print("FT, for association:");
-    desh_print("  Long RD ID: %u", assoc_nbr->long_rd_id);
-    desh_print("  Short RD ID: %u", assoc_nbr->short_rd_id);
-    desh_print("  Network ID: %u (0x%08x)", assoc_nbr->nw_id_32bit, assoc_nbr->nw_id_32bit);
-    desh_print("  Channel: %u", assoc_nbr->channel);
+    desh_print("  Long RD ID: %u", ptr_assoc_nbr->long_rd_id);
+    desh_print("  Short RD ID: %u", ptr_assoc_nbr->short_rd_id);
+    desh_print("  Network ID: %u (0x%08x)", ptr_assoc_nbr->nw_id_32bit, ptr_assoc_nbr->nw_id_32bit);
+    desh_print("  Channel: %u", ptr_assoc_nbr->channel);
     
     // Prepare association parameters
     struct dect_phy_mac_associate_params assoc_params = {
@@ -286,7 +287,7 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16
     k_sleep(K_SECONDS(15));
     
     // Check if we're now associated
-    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(assoc_nbr->short_rd_id);
+    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(ptr_assoc_nbr->short_rd_id);
     
     if (is_associated)
 	{
@@ -298,29 +299,19 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *assoc_nbr, uint16
 	return false;
     
 }
-/*
-int send_data_to_ft(const char *data)
+
+int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
 {
-    if (!my_association.is_associated) {
+    if (ptr_assoc_ft == NULL) {
         desh_error("Not associated with any FT. Cannot send data.");
-        return -ENOTCONN;
-    }
-    
-    desh_print("Sending data to FT (long_rd_id=%u)...", my_association.ft_long_rd_id);
-    
-    // Get fresh neighbor info (beacon might have updated)
-    struct dect_phy_mac_nbr_info_list_item *ft_info = 
-        dect_phy_mac_nbr_info_get_by_long_rd_id(my_association.ft_long_rd_id);
-    
-    if (!ft_info) {
-        desh_error("FT no longer in neighbor list. Re-scan needed.");
-        my_association.is_associated = false;
         return -ENODEV;
     }
     
+    desh_print("Sending data to parent FT (long_rd_id=%u)...", ptr_assoc_ft->long_rd_id);
+    
     // Prepare RACH (Random Access Channel) transmission parameters
     struct dect_phy_mac_rach_tx_params rach_params = {
-        .target_long_rd_id = my_association.ft_long_rd_id,
+        .target_long_rd_id = ptr_assoc_ft->long_rd_id,
         .tx_power_dbm = 0,
         .mcs = 0,
         .interval_secs = 0,  // 0 = send once, >0 = continuous with interval
@@ -342,7 +333,7 @@ int send_data_to_ft(const char *data)
     
     return 0;
 }
-*/
+
 
 int main(void)
 {
@@ -376,7 +367,6 @@ int main(void)
 	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-	bool is_ft_associated = false;
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
@@ -406,6 +396,13 @@ int main(void)
 
 	for(int i = 0; i < no_scans; i++)
 	{
+		bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+		while (rx_ongoing == true)
+		{
+			rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+			k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
+		}
+
 		err = scan_for_ft_beacons(scan_duration_channel);
 		k_sleep(K_SECONDS(scan_duration_all * 2));
 
@@ -414,28 +411,28 @@ int main(void)
 			desh_error("Failed to scan for FT beacons, err %d", err);
 			return 0;
 		}
-
-		desh_print("\n=== Discovered FT Devices ===");
-			bool device_found = false;
-
-			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				if (!(ptr_nbrs+i)->reserved)
-				{
-					device_found = true;
-					continue;
-				} 
-				
-				desh_print("FT #%d:", i + 1);
-				desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
-				desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-				desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
-				desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
-			}
-
-			if (!device_found) desh_error("No FT devices found! Retrying...");
-
-			desh_print("=============================\n");
 	}
+
+	// Print the neighbor status before proceeding
+	desh_print("\n=== Discovered FT Devices ===");
+	bool device_found = false;
+
+	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
+		if (!(ptr_nbrs+i)->reserved)
+		{
+			device_found = true;
+			continue;
+		} 
+		
+		desh_print("FT #%d:", i + 1);
+		desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
+		desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
+		desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+		desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
+	}
+
+	if (!device_found) desh_error("No FT devices found! Retrying...");
+	desh_print("=============================\n");
 
 	k_sleep(K_SECONDS(2));
 
@@ -459,8 +456,6 @@ int main(void)
         desh_error("Association failed");
         return 0;
     }
-
-	// print_association_status();
 
 	k_sleep(K_SECONDS(2));
 
@@ -493,32 +488,26 @@ int main(void)
 
 
 	/* TRANSMIT DATA */
-	/*
 	int counter = 0;
 	char message[DECT_DATA_MAX_LEN];
 
 	while (1) {
         // Send single message
         snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
-        err = send_data_to_ft(message);
+        err = send_data_to_ft(message, ptr_assoc_nbr);
         
         if (err) {
-            desh_error("Failed to send data. Re-scanning...");
-            
-            // Try to re-associate
-            scan_for_ft_beacons();
-            k_sleep(K_SECONDS(2));
-            associate_with_ft(target_ft_long_rd_id);
+            desh_error("Failed to send data, err %d", err);
+            break;
         }
         
         k_sleep(K_SECONDS(10));  // Send every 10 seconds
         
         // Optional: Print status every few iterations
         if (counter % 5 == 0) {
-            print_association_status();
             dect_phy_mac_client_status_print();
         }
-    }*/
+    }
 
 end_of_life:
 	desh_print("End of RD operation.");
