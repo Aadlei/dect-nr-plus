@@ -182,21 +182,9 @@ static void desh_print_reset_reason(void)
 }
 */
 
-enum band_1_channels
-{
-	c1657,
-	c1659,
-	c1661,
-	c1663,
-	c1665,
-	c1667,
-	c1669,
-	c1671,
-	c1673,
-	c1675,
-	c1677,
-	no_channels
-};
+// Global variables
+struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+
 
 // Scan for scan duration seconds. Whole thread sleeps for 2 * scan duration seconds
 int scan_for_ft_beacons(uint32_t scan_duration_secs)
@@ -208,7 +196,7 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
         .duration_secs = scan_duration_secs,
         .channel = 0,  // Or 0 to scan all channels
         .expected_rssi_level = 0,
-        .clear_nbr_cache_before_scan = 1,
+        .clear_nbr_cache_before_scan = 0,
         .suspend_scheduler = 1,
     };
     
@@ -303,8 +291,34 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
 
 void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 {
-	// TODO: Implementere dette
-	return;
+	// Get the data message and length
+	uint8_t message = sdu_data_item.message.data_sdu.data;
+	uint16_t length = sdu_data_item.message.data_sdu.data_length;
+
+	// Copy into string
+	unsigned char u_rx_data[DECT_DATA_MAX_LEN];
+	memcpy(u_rx_data, message, length);
+	u_rx_data[length] = '\0';
+
+	// Cast to regular char[]
+	char *rx_data = (char *)(&u_rx_data);
+	rx_data[DECT_DATA_MAX_LEN-1] = '\0';
+
+	if (ptr_assoc_nbr == NULL)
+	{
+		desh_error("No associated FT. Not relaying message...");
+		return;
+	}
+	
+	// Send single message
+	int err = send_data_to_ft(rx_data, ptr_assoc_nbr);
+
+	if (err) {
+		desh_error("Failed to send data, err %d", err);
+		return;
+	}
+
+	desh_print("Message successfully relayed!");
 }
 
 int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
@@ -371,13 +385,13 @@ int main(void)
 	/* Important structs for the running device */
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
-	struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+	// struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
 	bool ftpt_mode = true;
 	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 1337; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
@@ -396,7 +410,7 @@ int main(void)
 	/* BEACON SCAN */
 	// Maybe fix this setup here
 	uint32_t no_channels_in_band = 11;
-	uint32_t scan_duration_channel = 1;
+	uint32_t scan_duration_channel = 2;
 	uint32_t scan_duration_all = 
 		no_channels_in_band * scan_duration_channel;
 	uint32_t no_scans = 5;
@@ -407,6 +421,7 @@ int main(void)
 		while (rx_ongoing == true)
 		{
 			rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+			desh_print("RX ongoing. Sleeping before trying again...");
 			k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
 		}
 
@@ -496,6 +511,7 @@ int main(void)
 	// TODO: Hvis ikke noen association requests --> Endre ftpt_mode til false
 
 	// Temp løsning for å gjøre forskjell på PT og FTPT
+	if (current_settings.common.transmitter_id == 4567) ftpt_mode = false;
 
 	if (ftpt_mode == true)
 	{
