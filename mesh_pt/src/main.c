@@ -237,7 +237,7 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
     
 }
 
-int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft, bool include_temp)
+int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
 {
     if (ptr_assoc_ft == NULL) {
         desh_error("Not associated with any FT. Cannot send data.");
@@ -252,7 +252,7 @@ int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *pt
         .tx_power_dbm = 0,
         .mcs = 0,
         .interval_secs = 0,  // 0 = send once, >0 = continuous with interval
-        .get_mdm_temp = include_temp,   // Set to 1 if you want to include modem temp in data
+        .get_mdm_temp = 0,   // KEEP 0. TEMPERATURE ALREADY SET!
     };
     
     // Copy data to send (max DECT_DATA_MAX_LEN bytes)
@@ -293,7 +293,7 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	}
 	
 	// Send data to FT
-	int err = send_data_to_ft(rx_data, ptr_assoc_nbr, false);
+	int err = send_data_to_ft(rx_data, ptr_assoc_nbr);
 	if (err) {
 		desh_error("Failed to send data, err %d", err);
 		return;
@@ -476,13 +476,30 @@ int main(void)
 	{
 		/* TRANSMIT DATA */
 		int counter = 0;
-		char message[DECT_DATA_MAX_LEN];
+		
+		while (1)
+		{
+			// Get temperature
+			int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
 
-		while (1) {
-			// Send single message
-			snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
-			err = send_data_to_ft(message, ptr_assoc_nbr, true);
-			
+			// String data to send
+			char message[DECT_DATA_MAX_LEN];
+			sprintf(message, "Hello from PT! Counter: %d", counter);
+
+			// Actual tx message to send
+			char tx_message[DECT_DATA_MAX_LEN];
+			if (mdm_temperature == NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED)
+			{
+				sprintf(tx_message, "{\"transmitter_long_rd_id\":%d,\"data\":\"%s\",\"m_tmp\":\"N/A\"}",
+					current_settings.common.transmitter_id, message);
+			}
+			else
+			{
+				sprintf(tx_message, "{\"transmitter_long_rd_id\":%d,\"data\":\"%s\",\"m_tmp\":\"%d\"}",
+					current_settings.common.transmitter_id, message, mdm_temperature);
+			}
+
+			err = send_data_to_ft(tx_message, ptr_assoc_nbr);
 			if (err) {
 				desh_error("Failed to send data, err %d", err);
 				break;
