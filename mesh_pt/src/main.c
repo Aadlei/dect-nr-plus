@@ -130,59 +130,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
 
-/*
-static void reset_reason_str_get(char *str, uint32_t reason)
-{
-	size_t len;
-
-	*str = '\0';
-
-	if (reason & NRFX_RESET_REASON_RESETPIN_MASK) {
-		(void)strcat(str, "PIN reset | ");
-	}
-	if (reason & NRFX_RESET_REASON_DOG_MASK) {
-		(void)strcat(str, "watchdog | ");
-	}
-	if (reason & NRFX_RESET_REASON_OFF_MASK) {
-		(void)strcat(str, "wakeup from power-off | ");
-	}
-	if (reason & NRFX_RESET_REASON_DIF_MASK) {
-		(void)strcat(str, "debug interface wakeup | ");
-	}
-	if (reason & NRFX_RESET_REASON_SREQ_MASK) {
-		(void)strcat(str, "software | ");
-	}
-	if (reason & NRFX_RESET_REASON_LOCKUP_MASK) {
-		(void)strcat(str, "CPU lockup | ");
-	}
-	if (reason & NRFX_RESET_REASON_CTRLAP_MASK) {
-		(void)strcat(str, "control access port | ");
-	}
-
-	len = strlen(str);
-	if (len == 0) {
-		(void)strcpy(str, "power-on reset");
-	} else {
-		str[len - 3] = '\0';
-	}
-}
-
-static void desh_print_reset_reason(void)
-{
-	uint32_t reset_reason;
-	char reset_reason_str[128];
-
-	// Read RESETREAS register value and clear current reset reason(s).
-	reset_reason = nrfx_reset_reason_get();
-	nrfx_reset_reason_clear(reset_reason);
-
-	reset_reason_str_get(reset_reason_str, reset_reason);
-
-	printk("\nReset reason: %s\n", reset_reason_str);
-}
-*/
-
-// Global variables
+// Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
 
 
@@ -194,9 +142,9 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
         .duration_secs = scan_duration_secs,
-        .channel = 0,  // Or 0 to scan all channels
+        .channel = 0,  // 0 scans all channels
         .expected_rssi_level = 0,
-        .clear_nbr_cache_before_scan = 0,
+        .clear_nbr_cache_before_scan = 0, // 1 means clearing the neighbor list before each scan
         .suspend_scheduler = 1,
     };
     
@@ -280,7 +228,7 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
     
     if (is_associated)
 	{
-        desh_print("Successfully associated with FT!");
+        desh_print("Successfully associated with FT (long RD ID): %d", ptr_assoc_nbr->long_rd_id);
         return true;
     }
 	
@@ -289,39 +237,7 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
     
 }
 
-void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
-{
-	// Get the data message and length
-	uint8_t message = sdu_data_item.message.data_sdu.data;
-	uint16_t length = sdu_data_item.message.data_sdu.data_length;
-
-	// Copy into string
-	unsigned char u_rx_data[DECT_DATA_MAX_LEN];
-	memcpy(u_rx_data, message, length);
-	u_rx_data[length] = '\0';
-
-	// Cast to regular char[]
-	char *rx_data = (char *)(&u_rx_data);
-	rx_data[DECT_DATA_MAX_LEN-1] = '\0';
-
-	if (ptr_assoc_nbr == NULL)
-	{
-		desh_error("No associated FT. Not relaying message...");
-		return;
-	}
-	
-	// Send single message
-	int err = send_data_to_ft(rx_data, ptr_assoc_nbr);
-
-	if (err) {
-		desh_error("Failed to send data, err %d", err);
-		return;
-	}
-
-	desh_print("Message successfully relayed!");
-}
-
-int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
+int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft, bool include_temp)
 {
     if (ptr_assoc_ft == NULL) {
         desh_error("Not associated with any FT. Cannot send data.");
@@ -336,7 +252,7 @@ int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *pt
         .tx_power_dbm = 0,
         .mcs = 0,
         .interval_secs = 0,  // 0 = send once, >0 = continuous with interval
-        .get_mdm_temp = 1,   // Set to 1 if you want to include modem temp in data
+        .get_mdm_temp = include_temp,   // Set to 1 if you want to include modem temp in data
     };
     
     // Copy data to send (max DECT_DATA_MAX_LEN bytes)
@@ -353,6 +269,37 @@ int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *pt
     desh_print("Data transmission started: \"%s\"", data);
     
     return 0;
+}
+
+void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
+{
+	// Get the data message and length
+	uint16_t length = sdu_data_item.message.data_sdu.data_length;
+
+	// Copy into string
+	unsigned char u_rx_data[DECT_DATA_MAX_LEN];
+	memcpy(u_rx_data, sdu_data_item.message.data_sdu.data, length);
+	u_rx_data[length] = '\0';
+
+	// Cast to regular char[]
+	char *rx_data = (char *)(&u_rx_data);
+	rx_data[DECT_DATA_MAX_LEN-1] = '\0';
+
+	// Make sure assoication exists before sending!
+	if (ptr_assoc_nbr == NULL)
+	{
+		desh_error("No associated FT. Not relaying message...");
+		return;
+	}
+	
+	// Send data to FT
+	int err = send_data_to_ft(rx_data, ptr_assoc_nbr, false);
+	if (err) {
+		desh_error("Failed to send data, err %d", err);
+		return;
+	}
+
+	desh_print("Message successfully relayed!");
 }
 
 
@@ -391,7 +338,7 @@ int main(void)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 1337; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
@@ -413,7 +360,7 @@ int main(void)
 	uint32_t scan_duration_channel = 2;
 	uint32_t scan_duration_all = 
 		no_channels_in_band * scan_duration_channel;
-	uint32_t no_scans = 5;
+	uint32_t no_scans = 2;
 
 	for(int i = 0; i < no_scans; i++)
 	{
@@ -426,13 +373,21 @@ int main(void)
 		}
 
 		err = scan_for_ft_beacons(scan_duration_channel);
-		k_sleep(K_SECONDS(scan_duration_all * 2));
+		// k_sleep(K_SECONDS(scan_duration_all));
 
 		if (err) 
 		{
 			desh_error("Failed to scan for FT beacons, err %d", err);
 			return 0;
 		}
+	}
+
+	bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+	while (rx_ongoing == true)
+	{
+		rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+		desh_print("RX ongoing. Sleeping before trying again..."); // TODO: Fjerne denne for den flooder terminalen
+		k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
 	}
 
 	// Print the neighbor status before proceeding
@@ -484,7 +439,7 @@ int main(void)
 
 	/* BEACON START */
 	bool beacon_started = false;
-	int beacon_tries = 5;
+	int beacon_tries = 4;
 
 	for(int i = 0; i < beacon_tries; i++)
 	{
@@ -526,7 +481,7 @@ int main(void)
 		while (1) {
 			// Send single message
 			snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
-			err = send_data_to_ft(message, ptr_assoc_nbr);
+			err = send_data_to_ft(message, ptr_assoc_nbr, true);
 			
 			if (err) {
 				desh_error("Failed to send data, err %d", err);
