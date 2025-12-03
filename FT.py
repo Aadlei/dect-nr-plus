@@ -43,28 +43,49 @@ class DeviceDataParser:
 
         return None
 
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        print("✅ Connected to MQTT Broker!")
+    else:
+        print(f"❌ Failed to connect, return code {rc}")
+
 
 if __name__ == '__main__':
+    # MQTT Setup
+    mqtt_client = mqtt.Client("SerialToMQTT")
+    mqtt_client.on_connect = on_connect
+    mqtt_client.connect("10.225.15.248", 1883, 60)
+    mqtt_client.loop_start()
+    
+    # Serial Setup
     ser = serial.Serial('COM8', 115200)
     parser = DeviceDataParser()
-
+    
     try:
         while True:
             if ser.in_waiting > 0:
                 line = ser.readline().decode('utf-8').strip()
-
                 structured_data = parser.parse_line(line)
+                
                 if structured_data:
                     print(f"📡 Device {structured_data['transmitter_id']} → {structured_data['receiver_id']}")
                     print(f"   Message: {structured_data['payload']['data']}")
                     print(f"   Temperature: {structured_data['payload']['m_tmp']}°C")
                     print(f"   Time: {time.strftime('%H:%M:%S', time.localtime(structured_data['timestamp']))}")
                     print("-" * 40)
-
+                    
+                    # Publish to MQTT
+                    topic = f"devices/tx{structured_data['transmitter_id']}/rx{structured_data['receiver_id']}"
+                    mqtt_client.publish(topic, json.dumps(structured_data))
+                    print(f"📤 Published to {topic}")
+            
             time.sleep(0.5)
+            
     except KeyboardInterrupt:
         print("Exiting...")
     finally:
+        mqtt_client.loop_stop()
+        mqtt_client.disconnect()
         ser.close()
-        print("Serial closed.")
+        print("Serial and MQTT closed.")
 
