@@ -42,23 +42,23 @@ class DeviceDataParser:
                     print(f"Invalid JSON: {json_str}")
 
         return None
-
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
+    
+def on_connect(client, userdata, connect_flags, reason_code, properties):
+    if reason_code == 0:
         print("✅ Connected to MQTT Broker!")
     else:
-        print(f"❌ Failed to connect, return code {rc}")
+        print(f"❌ Failed to connect, return code {reason_code}")
 
 
 if __name__ == '__main__':
     # MQTT Setup
-    mqtt_client = mqtt.Client("SerialToMQTT")
+    mqtt_client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, "SerialToMQTT")
     mqtt_client.on_connect = on_connect
-    mqtt_client.connect("10.225.15.248", 1883, 60)
+    mqtt_client.connect("10.225.150.248", 1883, 60)
     mqtt_client.loop_start()
     
     # Serial Setup
-    ser = serial.Serial('COM8', 115200)
+    ser = serial.Serial('COM9', 115200)
     parser = DeviceDataParser()
     
     try:
