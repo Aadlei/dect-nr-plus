@@ -156,9 +156,6 @@ int scan_for_ft_beacons(uint32_t scan_duration_secs)
     
     desh_print("Beacon scan started. Waiting for results...");
     
-    // Wait for scan to complete
-    //k_sleep(K_SECONDS(params.duration_secs * 2));
-    
     return 0;
 }
 
@@ -356,10 +353,7 @@ int main(void)
 
 	/* BEACON SCAN */
 	// Maybe fix this setup here
-	uint32_t no_channels_in_band = 11;
 	uint32_t scan_duration_channel = 2;
-	uint32_t scan_duration_all = 
-		no_channels_in_band * scan_duration_channel;
 	uint32_t no_scans = 2;
 
 	for(int i = 0; i < no_scans; i++)
@@ -373,7 +367,6 @@ int main(void)
 		}
 
 		err = scan_for_ft_beacons(scan_duration_channel);
-		// k_sleep(K_SECONDS(scan_duration_all));
 
 		if (err) 
 		{
@@ -483,8 +476,8 @@ int main(void)
 			int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
 
 			// String data to send
-			char message[DECT_DATA_MAX_LEN];
-			sprintf(message, "Hello from PT! Counter: %d", counter);
+			char message[40];
+			sprintf(message, "Hello from PT! Counter: %d", counter++);
 
 			// Actual tx message to send
 			char tx_message[DECT_DATA_MAX_LEN];
