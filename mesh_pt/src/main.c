@@ -64,6 +64,7 @@ struct k_work_q desh_common_work_q;
 
 /* Global variables */
 const struct shell *desh_shell;
+
 char desh_at_resp_buf[DESH_AT_CMD_RESPONSE_MAX_LEN];
 K_MUTEX_DEFINE(desh_at_resp_buf_mutex);
 
@@ -130,22 +131,18 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
 
-/* CUSTOM SHIT */
 // Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = NULL; // Reference to neighbor list
-struct dect_phy_settings current_settings; // The device settings
-uint32_t long_rd_id = 4567;
-bool ftpt_mode = true;
 
-/* jsmn helper function */
-static int jsoneq(const char *json, jsmntok_t *tok, const char *s) {
-  if (tok->type == JSMN_STRING && (int)strlen(s) == tok->end - tok->start &&
+static int jsoneq(const char *json, jsmntok_t *tok, const char *s)
+{
+	if (tok->type == JSMN_STRING && (int)strlen(s) == tok->end - tok->start &&
       strncmp(json + tok->start, s, tok->end - tok->start) == 0) {
     return 0;
   }
   return -1;
 }
+
 
 // Scan for scan duration seconds. Whole thread sleeps for 2 * scan duration seconds
 int scan_for_ft_beacons(uint32_t scan_duration_secs)
@@ -197,12 +194,12 @@ struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_ma
 
 bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, uint16_t *ft_channel) // ft_channel must be pointer pointer
 {
+    desh_print("Attempting to associate with FT (Long RD ID = %u)...", ptr_assoc_nbr->long_rd_id);
+    
     if (!ptr_assoc_nbr) {
         desh_error("FT not found in scan results");
         return -EINVAL;
     }
-
-	desh_print("Attempting to associate with FT (Long RD ID = %u)...", ptr_assoc_nbr->long_rd_id);
 	
 	uint32_t target_long_rd_id = ptr_assoc_nbr->long_rd_id;
 	// *ft_channel = ptr_assoc_nbr->channel; // Store the channel for this association to increment for RDs next beacon scan
@@ -287,13 +284,9 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	uint16_t length = sdu_data_item.message.data_sdu.data_length;
 
 	// Copy into string
-	unsigned char u_rx_data[DECT_DATA_MAX_LEN];
-	memcpy(u_rx_data, sdu_data_item.message.data_sdu.data, length);
-	u_rx_data[length] = '\0';
-
-	// Cast to regular char[]
-	char *rx_data = (char *)(&u_rx_data);
-	rx_data[DECT_DATA_MAX_LEN-1] = '\0';
+	static char rx_data[DECT_DATA_MAX_LEN];
+	memcpy(rx_data, sdu_data_item.message.data_sdu.data, length);
+	rx_data[length] = '\0';
 
 	// Make sure assoication exists before parsing and sending!
 	if (ptr_assoc_nbr == NULL)
@@ -303,14 +296,13 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	}
 
 	// Use JSON parser to decide if this is supposed to be uplink message
-	int r;
-	jsmn_parser p;
-	jsmntok_t t[100];
+	static jsmn_parser p;
+	static jsmntok_t t[100];
 
 	jsmn_init(&p);
-	r = jsmn_parse(&p, rx_data, strlen(rx_data), t, sizeof(t) / sizeof(t[0]));
+	int r = jsmn_parse(&p, rx_data, strlen(rx_data), t, 100);
 
-	if (r < 0 || (r < 1 || t[0].type != JSMN_OBJECT))
+	if (r < 1 || t[0].type != JSMN_OBJECT)
 	{
 		desh_error("Failed to parse incoming JSON data");
 		return;
@@ -323,14 +315,14 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 		return;
 	}
 
-	char msg_type[15];
-	strncpy(msg_type, rx_data + t[2].start, t[2].end - t[2].start);
+	char msg_type[16];
+	int size = t[2].end - t[2].start;
+	strncpy(msg_type, rx_data + t[2].start, size);
 	msg_type[t[2].end - t[2].start] = '\0';
 	desh_warn(msg_type);
-	char *ft_uplink_str = "ft_uplink";
 
 	// Check if message type is ft uplink
-	if (strcmp(msg_type, ft_uplink_str) != 0)
+	if (strcmp(msg_type, "ft_uplink") != 0)
 	{
 		desh_error("Message is not an FT uplink. Not relaying message...");
 		return;
@@ -338,7 +330,8 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	
 	// After all cehcks, send data to FT
 	int err = send_data_to_ft(rx_data, ptr_assoc_nbr);
-	if (err) {
+	if (err)
+	{
 		desh_error("Failed to send data, err %d", err);
 		return;
 	}
@@ -373,9 +366,16 @@ int main(void)
 		startup_cmd_ctrl_init();
 	#endif
 
+	/* Important structs for the running device */
+	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
+	struct dect_phy_settings current_settings; // The device settings
+	// struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+	bool ftpt_mode = true;
+	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
+
 	/* Read and write current settings */
-	ptr_nbrs = dect_phy_mac_nbr_info();
 	dect_common_settings_read(&current_settings);
+	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
@@ -496,9 +496,6 @@ int main(void)
 		k_sleep(K_SECONDS(30));
 	}
 
-	// Stop beacon transmission
-	dect_phy_mac_ctrl_cluster_beacon_stop(DECT_PHY_MAC_CTRL_BEACON_STOP_CAUSE_USER_INITIATED);
-
 	// TODO: Hvis ikke noen association requests --> Endre ftpt_mode til false
 
 	// Temp løsning for å gjøre forskjell på PT og FTPT
@@ -552,9 +549,9 @@ int main(void)
 			k_sleep(K_SECONDS(10));  // Send every 10 seconds
 			
 			// Optional: Print status every few iterations
-			/*if (counter % 5 == 0) {
+			if (counter % 5 == 0) {
 				dect_phy_mac_client_status_print();
-			}*/
+			}
 		}
 	}
 
