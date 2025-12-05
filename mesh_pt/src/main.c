@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include "jsmn.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
@@ -282,16 +283,46 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	char *rx_data = (char *)(&u_rx_data);
 	rx_data[DECT_DATA_MAX_LEN-1] = '\0';
 
-	// Make sure assoication exists before sending!
+	// Make sure assoication exists before parsing and sending!
 	if (ptr_assoc_nbr == NULL)
 	{
 		desh_error("No associated FT. Not relaying message...");
 		return;
 	}
 
-	// TODO: Check if field is "ft_uplink"
+	// Use JSON parser to decide if this is supposed to be uplink message
+	int i;
+	int r;
+	jsmn_parser p;
+	jsmntok_t t[100];
+
+	jsmn_init(&p);
+	r = jsmn_parse(&p, rx_data, strlen(rx_data), t, sizeof(t) / sizeof(t[0]));
+
+	if (r < 0 || (r < 1 || t[0].type != JSMN_OBJECT))
+	{
+		desh_error("Failed to parse incoming JSON data");
+		return;
+	}
+
+	// Check if first field is message type
+	if (jsoneq(rx_data, &t[1], "msg_type") != 0)
+	{
+		desh_error("Failed to read first field in incoming JSON!");
+		return;
+	}
+
+	char *msg_type = strndup(rx_data + t[2].start, t[2].end - t[2].start);
+	char *ft_uplink_str = "ft_uplink";
+
+	// Check if message type is ft uplink
+	if (strcmp(msg_type, ft_uplink_str) != 0)
+	{
+		desh_error("Message is not an FT uplink. Not relaying message...");
+		return;
+	}
 	
-	// Send data to FT
+	// After all cehcks, send data to FT
 	int err = send_data_to_ft(rx_data, ptr_assoc_nbr);
 	if (err) {
 		desh_error("Failed to send data, err %d", err);
@@ -486,18 +517,18 @@ int main(void)
 			if (mdm_temperature == NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED)
 			{
 				sprintf(tx_message,
-					"{\"message_type\":\"ft_uplink\","
+					"{\"msg_type\":\"ft_uplink\","
 					"\"transmitter_long_id\":%d,"
-					"\"message\":\"%s\","
+					"\"msg\":\"%s\","
 					"\"m_tmp\":\"N/A\"}",
 					current_settings.common.transmitter_id, message);
 			}
 			else
 			{
 				sprintf(tx_message,
-					"{\"message_type\":\"ft_uplink\","
+					"{\"msg_type\":\"ft_uplink\","
 					"\"transmitter_long_id\":%d,"
-					"\"message\":\"%s\","
+					"\"msg\":\"%s\","
 					"\"m_tmp\":\"%d\"}",
 					current_settings.common.transmitter_id, message, mdm_temperature);
 			}
