@@ -35,6 +35,9 @@
 #include "dect_phy_mac_client.h"
 #include "dect_phy_mac_ctrl.h"
 
+static void (*assoc_resp_callback)(bool) = NULL;
+void register_assoc_resp_callback(void (*cb)(bool)) { assoc_resp_callback = cb; }
+
 extern struct k_work_q dect_phy_ctrl_work_q;
 extern struct k_sem rssi_scan_sema;
 
@@ -419,6 +422,14 @@ void dect_phy_mac_ctrl_th_phy_api_mdm_op_complete_cb(
 		} else if (params->handle == DECT_PHY_MAC_CLIENT_ASSOCIATION_RX_HANDLE) {
 			desh_print("RX for Association Response completed.");
 		} else if (params->handle == DECT_PHY_MAC_BEACON_RA_RESP_TX_HANDLE) {
+			/* Custom shit */
+			desh_warn("Here1?");
+			if (assoc_resp_callback != NULL)
+			{
+				desh_warn("Here2?");
+				assoc_resp_callback(true);
+			}
+
 			desh_print("Beacon TX for Association Resp completed.");
 		} else if (params->handle == DECT_PHY_MAC_CLIENT_ASSOCIATION_REL_TX_HANDLE) {
 			desh_print("TX for Association Release completed.");

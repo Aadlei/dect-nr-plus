@@ -32,10 +32,6 @@
 
 /**************************************************************************************************/
 
-/* Custom shit */
-static void (*assoc_resp_callback)(bool) = NULL;
-void register_assoc_resp_callback(void (*cb)(bool)) { assoc_resp_callback = cb; }
-
 extern struct k_work_q dect_phy_ctrl_work_q;
 
 enum dect_phy_mac_client_association_states {
@@ -743,12 +739,6 @@ static void dect_phy_mac_client_associate_resp_timeout_worker(struct k_work *wor
 
 	if (association_data->state !=
 		DECT_PHY_MAC_CLIENT_ASSOCIATION_STATE_WAITING_ASSOCIATION_RESP) {
-
-		/* Custom shit */
-		if (assoc_resp_callback != NULL) {
-			assoc_resp_callback(true);
-		}
-		
 		return;
 	}
 
