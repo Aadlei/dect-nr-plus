@@ -411,7 +411,7 @@ int main(void)
 	for(int i = 0; i < no_scans; i++)
 	{
 		bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-		while (rx_ongoing == true)
+		while (rx_ongoing)
 		{
 			rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
 			desh_print("RX ongoing. Sleeping before trying again...");
@@ -426,9 +426,9 @@ int main(void)
 			return 0;
 		}
 	}
-
+	// TODO: FIx whatever is going on here
 	bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-	while (rx_ongoing == true)
+	while (rx_ongoing)
 	{
 		rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
 		// desh_print("RX ongoing. Sleeping before trying again..."); // Denne flooder terminalen
@@ -509,23 +509,23 @@ int main(void)
 		k_sleep(K_SECONDS(30));
 	}
 
-	if (ftpt_mode == true)
+	int msg_counter = 0;
+
+	while (1)
 	{
-		register_rx_callback(relay_pt_message); // Registers the local function as callback for whenever device receive pt data
-	}
-	else
-	{
-		/* TRANSMIT DATA */
-		int counter = 0;
-		
-		while (1)
+		if (ftpt_mode)
+			register_rx_callback(relay_pt_message); // Registers the local function as callback for whenever device receive pt data
+		else
 		{
+			register_rx_callback(NULL);
+
+			/* TRANSMIT DATA */
 			// Get temperature
 			int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
 
 			// String data to send
 			char message[40];
-			sprintf(message, "Hello from PT! Counter: %d", counter++);
+			sprintf(message, "Hello from PT! Counter: %d", msg_counter++);
 
 			// Actual tx message to send
 			char tx_message[DECT_DATA_MAX_LEN];
@@ -553,14 +553,9 @@ int main(void)
 				desh_error("Failed to send data, err %d", err);
 				break;
 			}
-			
-			k_sleep(K_SECONDS(10));  // Send every 10 seconds
-			
-			// Optional: Print status every few iterations
-			if (counter % 5 == 0) {
-				dect_phy_mac_client_status_print();
-			}
 		}
+
+		k_sleep(K_SECONDS(10)); // Send every 10 seconds
 	}
 
 end_of_life:
