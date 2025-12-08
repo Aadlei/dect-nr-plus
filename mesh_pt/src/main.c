@@ -344,13 +344,11 @@ void change_rd_mode(bool make_ftpt)
 {
 	if (ftpt_mode == make_ftpt) return;
 
-	switch (make_ftpt)
-	{
-		case true:
-			desh_warn("Turned RD to FTPT mode.");
-		case false:
-			desh_warn("Made RD operate in PT mode.");
-	}
+	if (make_ftpt)
+		desh_warn("RD now operating in FTPT mode.");
+	else
+		desh_warn("RD now opearting in PT mode only.");
+
 	ftpt_mode = make_ftpt;
 }
 
@@ -389,7 +387,7 @@ int main(void)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 1337; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
