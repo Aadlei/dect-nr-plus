@@ -403,42 +403,29 @@ int main(void)
 		   current_settings.common.band_nbr);
 	desh_print("\n");
 
+	k_sleep(K_SECONDS(10)); // Wait some time 
+
 	/* BEACON SCAN */
 	// Maybe fix this setup here
-	uint32_t scan_duration_channel = 2;
-	uint32_t no_scans = 2;
-
-	for(int i = 0; i < no_scans; i++)
-	{
-		bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-		while (rx_ongoing)
-		{
-			rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-			desh_print("RX ongoing. Sleeping before trying again...");
-			k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
-		}
-
-		err = scan_for_ft_beacons(scan_duration_channel);
-
-		if (err) 
-		{
-			desh_error("Failed to scan for FT beacons, err %d", err);
-			return 0;
-		}
-	}
-	// TODO: FIx whatever is going on here
+	uint32_t scan_duration_channel = 2; // Seconds of scan per channel
 	bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-	while (rx_ongoing)
+
+	err = scan_for_ft_beacons(scan_duration_channel);
+    while (err)
 	{
-		rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
-		// desh_print("RX ongoing. Sleeping before trying again..."); // Denne flooder terminalen
+		desh_warn("Failed to scan for FT beacons, err %d", err);
+		err = scan_for_ft_beacons(scan_duration_channel);
+		k_sleep(K_SECONDS(1));
+	}
+
+	while (dect_phy_ctrl_rx_is_ongoing())
+	{
 		k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
 	}
 
 	// Print the neighbor status before proceeding
 	desh_print("\n=== Discovered FT Devices ===");
 	bool device_found = false;
-
 	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
 		if (!(ptr_nbrs+i)->reserved)
 		{
@@ -452,7 +439,6 @@ int main(void)
 		desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
 		desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
 	}
-
 	if (!device_found) desh_error("No FT devices found! Retrying...");
 	desh_print("=============================\n");
 
@@ -479,36 +465,38 @@ int main(void)
         return 0;
     }
 
-	k_sleep(K_SECONDS(2));
+	k_sleep(K_SECONDS(5));
 
 
 	/* BEACON START */
 	register_assoc_resp_callback(change_rd_mode);
 	bool beacon_started = false;
-	int beacon_tries = 4;
 
-	for(int i = 0; i < beacon_tries; i++)
-	{
-		if(!beacon_started) {		
-			struct dect_phy_mac_beacon_start_params params =
-			{
-				.tx_power_dbm = 0,
-				.beacon_channel = 0,
-			};
-			int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-			desh_print("Beacon returned: %d", ret);
-			if (ret) {
-				desh_print("Cannot start beacon, err %d", ret);
-			} else {
-				desh_print("Beacon starting");
-				beacon_started = true;
-			}
+	if(!beacon_started)
+	{		
+		struct dect_phy_mac_beacon_start_params params =
+		{
+			.tx_power_dbm = 0,
+			.beacon_channel = 0,
+		};
+
+		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+		desh_print("Beacon returned: %d", ret);
+		if (ret)
+		{
+			desh_print("Cannot start beacon, err %d", ret);
 		}
-
-		desh_print("Sleeping for 30 seconds...");
-		k_sleep(K_SECONDS(30));
+		else
+		{
+			desh_print("Beacon starting");
+			beacon_started = true;
+		}
 	}
 
+	k_sleep(K_SECONDS(60)); // Time for scanning and transmitting beacon
+	
+
+	/* FINAL MODE (TRANSMIT OR RELAY) */
 	int msg_counter = 0;
 
 	while (1)
