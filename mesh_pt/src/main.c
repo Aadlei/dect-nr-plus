@@ -133,6 +133,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 // Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+bool ftpt_mode = false;
 
 static int jsoneq(const char *json, jsmntok_t *tok, const char *s)
 {
@@ -338,6 +339,21 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	desh_print("Message successfully relayed!");
 }
 
+// Make device FTPT if true, else remain in PT mode
+void change_rd_mode(bool make_ftpt)
+{
+	if (ftpt_mode == make_ftpt) return;
+
+	switch (make_ftpt)
+	{
+		case true:
+			desh_warn("Turned RD to FTPT mode.");
+		case false:
+			desh_warn("Made RD operate in PT mode.");
+	}
+	ftpt_mode = make_ftpt;
+}
+
 
 int main(void)
 {
@@ -369,7 +385,6 @@ int main(void)
 	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
 	// struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-	bool ftpt_mode = true;
 	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
@@ -470,6 +485,7 @@ int main(void)
 
 
 	/* BEACON START */
+	register_assoc_resp_callback(change_rd_mode);
 	bool beacon_started = false;
 	int beacon_tries = 4;
 
@@ -494,11 +510,6 @@ int main(void)
 		desh_print("Sleeping for 30 seconds...");
 		k_sleep(K_SECONDS(30));
 	}
-
-	// TODO: Hvis ikke noen association requests --> Endre ftpt_mode til false
-
-	// Temp løsning for å gjøre forskjell på PT og FTPT
-	if (current_settings.common.transmitter_id == 4567) ftpt_mode = false;
 
 	if (ftpt_mode == true)
 	{

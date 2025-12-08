@@ -13,6 +13,8 @@
 #define DECT_PHY_MAC_CLIENT_ASSOCIATION_RESP_WAIT_TIME_SEC (3)
 
 /******************************************************************************/
+/* Custom shit */
+void register_assoc_resp_callback(void (*cb)(bool));
 
 int dect_phy_mac_client_rach_tx_start(
 	struct dect_phy_mac_nbr_info_list_item *target_nbr,
