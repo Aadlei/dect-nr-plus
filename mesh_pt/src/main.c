@@ -134,7 +134,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 // Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
+uint32_t long_rd_id = 2003; // THIS DEVICE LONG RD ID
 bool ftpt_mode = false;
 #define RELAY_JSON_MAX_LEN 256
 
@@ -217,7 +217,7 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
     
     // Prepare association parameters
     struct dect_phy_mac_associate_params assoc_params = {
-        .tx_power_dbm = 0,
+        .tx_power_dbm = 19,
         .mcs = 0,  // MCS 0 is most robust
         .target_long_rd_id = target_long_rd_id,
     };
@@ -260,7 +260,7 @@ int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *pt
     // Prepare RACH (Random Access Channel) transmission parameters
     struct dect_phy_mac_rach_tx_params rach_params = {
         .target_long_rd_id = ptr_assoc_ft->long_rd_id,
-        .tx_power_dbm = 0,
+        .tx_power_dbm = 19,
         .mcs = 0,
         .interval_secs = 0,  // 0 = send once, >0 = continuous with interval
         .get_mdm_temp = 0,   // KEEP 0. TEMPERATURE ALREADY SET!
@@ -560,7 +560,7 @@ beacon_period:
 	{		
 		struct dect_phy_mac_beacon_start_params params =
 		{
-			.tx_power_dbm = 0,
+			.tx_power_dbm = 19,
 			.beacon_channel = 0,
 		};
 
