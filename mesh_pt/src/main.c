@@ -6,6 +6,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include "jsmn.h"
 
 #include <zephyr/kernel.h>
@@ -133,7 +134,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 // Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-uint32_t long_rd_id = 1337; // THIS DEVICE LONG RD ID
+uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
 bool ftpt_mode = false;
 #define RELAY_JSON_MAX_LEN 256
 
@@ -314,7 +315,7 @@ int append_relay_node_json(
 	const char *in_json,
 	jsmntok_t *tokens,
 	int tok_count,
-	int my_node_id,
+	uint32_t my_node_id,
 	char *out_json,
 	size_t out_len)
 {
@@ -325,23 +326,16 @@ int append_relay_node_json(
 	}
 
 	jsmntok_t *arr = &tokens[arr_idx];
+    int prefix_len = arr->end - 1;
 
-	int arr_start = arr->start;
-	int arr_end = arr->end;
-	int prefix_len = arr_end - 1;
-
-	if (prefix_len + 16 >= out_len)
-		return -ENOMEM;
-
-	memcpy(out_json, in_json, prefix_len);
+    memcpy(out_json, in_json, prefix_len);
 
 	if (arr->size > 0)
-		snprintf(out_json + prefix_len, out_len - prefix_len, ",%d]", my_node_id);
+		snprintf(out_json + prefix_len, out_len - prefix_len, ",%" PRIu32 "]", my_node_id);
 	else
-		snprintf(out_json + prefix_len, out_len - prefix_len, "%d]"), my_node_id;
+		snprintf(out_json + prefix_len, out_len - prefix_len, "%" PRIu32 "]", my_node_id);
 
-	int suffix_len = strlen(in_json) - arr_end;
-	strncat(out_json, in_json + arr_end, out_len - strlen(out_json) - 1);
+	strncat(out_json, in_json + arr->end, out_len - strlen(out_json) - 1);
 
 	return 0;
 }
@@ -401,7 +395,6 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 	// Append own long RD ID to relay array
 	static char new_data_message[RELAY_JSON_MAX_LEN];
 
-	desh_warn("The device ID: %d", long_rd_id);
 	err = append_relay_node_json(
 		rx_data,
 		t,
@@ -425,7 +418,7 @@ void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
 		return;
 	}
 
-	desh_print("Message successfully relayed!");
+	desh_warn("Message successfully relayed!");
 }
 
 // Make device FTPT if true, else remain in PT mode
