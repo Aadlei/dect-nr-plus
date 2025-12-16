@@ -387,7 +387,7 @@ int main(void)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
-	uint32_t long_rd_id = 4567; // THIS DEVICE LONG RD ID
+	uint32_t long_rd_id = 1337; // THIS DEVICE LONG RD ID
 	current_settings.common.transmitter_id = long_rd_id;
 	dect_common_settings_write(&current_settings);
 
@@ -406,7 +406,7 @@ int main(void)
 	k_sleep(K_SECONDS(10)); // Wait some time 
 
 	/* BEACON SCAN */
-	// Maybe fix this setup here
+scanning_period:
 	uint32_t scan_duration_channel = 2; // Seconds of scan per channel
 	bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
 
@@ -439,10 +439,11 @@ int main(void)
 		desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
 		desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
 	}
-	if (!device_found) desh_error("No FT devices found! Retrying...");
+	if (!device_found) desh_error("No FT devices found!");
 	desh_print("=============================\n");
 
 	k_sleep(K_SECONDS(2));
+
 
 	/* ASSOCIATION */
 	desh_print("=== Finding Best Association Neighbor ===");
@@ -450,8 +451,8 @@ int main(void)
 
 	if (!ptr_assoc_nbr)
 	{
-		desh_print("No association neighbors found!");
-		goto end_of_life; // If no neighbors, no association, so we just skip. TODO: Go back to scanning
+		desh_print("No association neighbors found! Going back to scanning!");
+		goto scanning_period; // If no neighbors, no association, so we just skip.
 	}
 
 	desh_print("Found best neighbor with long RD ID: %d", ptr_assoc_nbr->long_rd_id);
@@ -462,13 +463,15 @@ int main(void)
 	bool association_status = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
     if (!association_status) {
         desh_error("Association failed");
-        return 0;
+        goto scanning_period;
     }
 
 	k_sleep(K_SECONDS(5));
 
 
 	/* BEACON START */
+	uint8_t beacon_duration = 100;
+beacon_period:
 	register_assoc_resp_callback(change_rd_mode);
 	bool beacon_started = false;
 
@@ -493,11 +496,14 @@ int main(void)
 		}
 	}
 
-	k_sleep(K_SECONDS(60)); // Time for scanning and transmitting beacon
+	k_sleep(K_SECONDS(beacon_duration)); // Time for scanning and transmitting beacon
 	
 
 	/* FINAL MODE (TRANSMIT OR RELAY) */
 	int msg_counter = 0;
+	int transmission_before_new_beacon = 15;
+
+	desh_warn("Starting to send data now!");
 
 	while (1)
 	{
@@ -506,44 +512,51 @@ int main(void)
 		else
 		{
 			register_rx_callback(NULL);
-
-			/* TRANSMIT DATA */
-			// Get temperature
-			int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
-
-			// String data to send
-			char message[40];
-			sprintf(message, "Hello from PT! Counter: %d", msg_counter++);
-
-			// Actual tx message to send
-			char tx_message[DECT_DATA_MAX_LEN];
-			if (mdm_temperature == NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED)
-			{
-				sprintf(tx_message,
-					"{\"msg_type\":\"ft_uplink\","
-					"\"transmitter_long_id\":%d,"
-					"\"msg\":\"%s\","
-					"\"m_tmp\":\"N/A\"}",
-					current_settings.common.transmitter_id, message);
-			}
-			else
-			{
-				sprintf(tx_message,
-					"{\"msg_type\":\"ft_uplink\","
-					"\"transmitter_long_id\":%d,"
-					"\"msg\":\"%s\","
-					"\"m_tmp\":\"%d\"}",
-					current_settings.common.transmitter_id, message, mdm_temperature);
-			}
-
-			err = send_data_to_ft(tx_message, ptr_assoc_nbr);
-			if (err) {
-				desh_error("Failed to send data, err %d", err);
-				break;
-			}
+			dect_phy_mac_ctrl_cluster_beacon_stop(DECT_PHY_MAC_CTRL_BEACON_STOP_CAUSE_USER_INITIATED);
 		}
 
-		k_sleep(K_SECONDS(10)); // Send every 10 seconds
+		/* TRANSMIT DATA */
+		// Get temperature
+		int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
+
+		// String data to send
+		char message[40];
+		sprintf(message, "Hello from PT! Counter: %d", msg_counter++);
+
+		// Actual tx message to send
+		char tx_message[DECT_DATA_MAX_LEN];
+		if (mdm_temperature == NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED)
+		{
+			sprintf(tx_message,
+				"{\"msg_type\":\"ft_uplink\","
+				"\"transmitter_long_id\":%d,"
+				"\"msg\":\"%s\","
+				"\"m_tmp\":\"N/A\"}",
+				current_settings.common.transmitter_id, message);
+		}
+		else
+		{
+			sprintf(tx_message,
+				"{\"msg_type\":\"ft_uplink\","
+				"\"transmitter_long_id\":%d,"
+				"\"msg\":\"%s\","
+				"\"m_tmp\":\"%d\"}",
+				current_settings.common.transmitter_id, message, mdm_temperature);
+		}
+
+		err = send_data_to_ft(tx_message, ptr_assoc_nbr);
+		if (err) {
+			desh_error("Failed to send data, err %d", err);
+			break;
+		}
+		
+		if (--transmission_before_new_beacon <= 0)
+		{
+			goto beacon_period;
+			beacon_duration = 10;
+		}
+
+		k_sleep(K_SECONDS(10));
 	}
 
 end_of_life:
