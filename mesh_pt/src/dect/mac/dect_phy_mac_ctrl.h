@@ -18,6 +18,8 @@ enum dect_phy_mac_ctrl_beacon_stop_cause {
 };
 
 /******************************************************************************/
+/* Custom shit */
+void register_assoc_resp_callback(void (*cb)(bool));
 
 int dect_phy_mac_ctrl_cluster_beacon_start(struct dect_phy_mac_beacon_start_params *params);
 void dect_phy_mac_ctrl_cluster_beacon_stop(enum dect_phy_mac_ctrl_beacon_stop_cause cause);

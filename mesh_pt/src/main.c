@@ -6,6 +6,8 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
+#include "jsmn.h"
 
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
@@ -35,6 +37,8 @@
 #include "dect_phy_mac_nbr_bg_scan.h"
 #include "dect_phy_mac_nbr.h"
 #include "dect_phy_mac_client.h"
+#include "dect_phy_mac.h"
+#include "dect_phy_ctrl.h"
 
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
@@ -57,27 +61,6 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_SHELL_BACKEND_SERIAL),
 #define DESH_COMMON_WORKQ_PRIORITY 5
 K_THREAD_STACK_DEFINE(desh_common_workq_stack, DESH_COMMON_WORKQUEUE_STACK_SIZE);
 struct k_work_q desh_common_work_q;
-#endif
-
-/* Button definition */
-#define SW0_NODE	DT_ALIAS(sw0)
-#if !DT_NODE_HAS_STATUS_OKAY(SW0_NODE)
-#error "Unsupported board: sw0 devicetree alias is not defined"
-#endif
-
-#define SW1_NODE	DT_ALIAS(sw1)
-#if !DT_NODE_HAS_STATUS_OKAY(SW1_NODE)
-#error "Unsupported board: sw1 devicetree alias is not defined"
-#endif
-
-#define SW2_NODE	DT_ALIAS(sw2)
-#if !DT_NODE_HAS_STATUS_OKAY(SW2_NODE)
-#error "Unsupported board: sw2 devicetree alias is not defined"
-#endif
-
-#define SW3_NODE	DT_ALIAS(sw3)
-#if !DT_NODE_HAS_STATUS_OKAY(SW3_NODE)
-#error "Unsupported board: sw3 devicetree alias is not defined"
 #endif
 
 /* Global variables */
@@ -149,129 +132,33 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
 
-/*
-static void reset_reason_str_get(char *str, uint32_t reason)
+// Global variables for high-level device information
+struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+uint32_t long_rd_id = 8000; // THIS DEVICE LONG RD ID
+bool ftpt_mode = false;
+#define RELAY_JSON_MAX_LEN 256
+
+static int jsoneq(const char *json, jsmntok_t *tok, const char *s)
 {
-	size_t len;
-
-	*str = '\0';
-
-	if (reason & NRFX_RESET_REASON_RESETPIN_MASK) {
-		(void)strcat(str, "PIN reset | ");
-	}
-	if (reason & NRFX_RESET_REASON_DOG_MASK) {
-		(void)strcat(str, "watchdog | ");
-	}
-	if (reason & NRFX_RESET_REASON_OFF_MASK) {
-		(void)strcat(str, "wakeup from power-off | ");
-	}
-	if (reason & NRFX_RESET_REASON_DIF_MASK) {
-		(void)strcat(str, "debug interface wakeup | ");
-	}
-	if (reason & NRFX_RESET_REASON_SREQ_MASK) {
-		(void)strcat(str, "software | ");
-	}
-	if (reason & NRFX_RESET_REASON_LOCKUP_MASK) {
-		(void)strcat(str, "CPU lockup | ");
-	}
-	if (reason & NRFX_RESET_REASON_CTRLAP_MASK) {
-		(void)strcat(str, "control access port | ");
-	}
-
-	len = strlen(str);
-	if (len == 0) {
-		(void)strcpy(str, "power-on reset");
-	} else {
-		str[len - 3] = '\0';
-	}
+	if (tok->type == JSMN_STRING && (int)strlen(s) == tok->end - tok->start &&
+      strncmp(json + tok->start, s, tok->end - tok->start) == 0) {
+    return 0;
+  }
+  return -1;
 }
 
-static void desh_print_reset_reason(void)
-{
-	uint32_t reset_reason;
-	char reset_reason_str[128];
 
-	// Read RESETREAS register value and clear current reset reason(s).
-	reset_reason = nrfx_reset_reason_get();
-	nrfx_reset_reason_clear(reset_reason);
-
-	reset_reason_str_get(reset_reason_str, reset_reason);
-
-	printk("\nReset reason: %s\n", reset_reason_str);
-}
-*/
-
-/* Button crap 
-// Button 1: 
-// Button 2:
-// Button 3:
-// Button 4:
-
-static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
-static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
-static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0});
-static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
-
-static struct gpio_callback button_1_cb_data;
-static struct gpio_callback button_2_cb_data;
-static struct gpio_callback button_3_cb_data;
-static struct gpio_callback button_4_cb_data;
-
-static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
-static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
-
-void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 1 pressed\n");
-}
-
-void button_2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 2 pressed\n");
-}
-
-void button_3_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 3 pressed\n");
-}
-
-void button_4_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
-{
-	printk("Button 4 pressed\n");
-}
-
-static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio_callback *cb, uint32_t pins) =
-{
-	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
-};
-*/
-
-struct pt_association_info {
-    bool is_associated;
-    uint32_t ft_long_rd_id;
-    uint16_t ft_short_rd_id;
-    uint32_t network_id;
-    uint16_t channel;
-};
-
-static struct pt_association_info my_association = {
-    .is_associated = false,
-    .ft_long_rd_id = 0,
-    .ft_short_rd_id = 0,
-    .network_id = 0,
-    .channel = 0
-};
-
-int scan_for_ft_beacons(void)
+// Scan for scan duration seconds. Whole thread sleeps for 2 * scan duration seconds
+int scan_for_ft_beacons(uint32_t scan_duration_secs)
 {
     desh_print("Starting beacon scan to find FT devices...");
     
 	// Temporary static settings
     struct dect_phy_mac_beacon_scan_params params = {
-        .duration_secs = 10,
-        .channel = 1665,  // Or 0 to scan all channels
+        .duration_secs = scan_duration_secs,
+        .channel = 0,  // 0 scans all channels
         .expected_rssi_level = 0,
-        .clear_nbr_cache_before_scan = 1,
+        .clear_nbr_cache_before_scan = 0, // 1 means clearing the neighbor list before each scan
         .suspend_scheduler = 1,
     };
     
@@ -283,42 +170,56 @@ int scan_for_ft_beacons(void)
     
     desh_print("Beacon scan started. Waiting for results...");
     
-    // Wait for scan to complete
-    k_sleep(K_SECONDS(params.duration_secs + 2));
-    
     return 0;
 }
 
-int associate_with_ft(uint32_t target_ft_long_rd_id)
+// Loop through neighbors and store the best candidate to association pointer.
+struct dect_phy_mac_nbr_info_list_item *find_best_association(struct dect_phy_mac_nbr_info_list_item *ptr_nbrs)
 {
-    desh_print("Attempting to associate with FT (long_rd_id=%u)...", target_ft_long_rd_id);
+	// Currently only picks the best RSSI. Should also sort them based on above/below threshold and hop count
+	struct dect_phy_mac_nbr_info_list_item *best_assoc_nbr = NULL;
+
+	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++)
+	{
+		if (!(ptr_nbrs+i)->reserved) continue;
+
+		if (!best_assoc_nbr)
+		{
+			best_assoc_nbr = ptr_nbrs + i;
+			continue;
+		}
+
+		if ((ptr_nbrs+i)->rssi_2 > best_assoc_nbr->rssi_2)
+			best_assoc_nbr = ptr_nbrs+i;
+	}
+
+	return best_assoc_nbr;
+}
+
+bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, uint16_t *ft_channel) // ft_channel must be pointer pointer
+{
+    desh_print("Attempting to associate with FT (Long RD ID = %u)...", ptr_assoc_nbr->long_rd_id);
     
-    // Get the neighbor info from scan results
-    struct dect_phy_mac_nbr_info_list_item *ft_info = 
-        dect_phy_mac_nbr_info_get_by_long_rd_id(target_ft_long_rd_id);
-    
-    if (!ft_info) {
-        desh_error("FT with long_rd_id=%u not found in scan results", target_ft_long_rd_id);
+    if (!ptr_assoc_nbr) {
+        desh_error("FT not found in scan results");
         return -EINVAL;
     }
+	
+	uint32_t target_long_rd_id = ptr_assoc_nbr->long_rd_id;
+	// *ft_channel = ptr_assoc_nbr->channel; // Store the channel for this association to increment for RDs next beacon scan
+	// This line is buggy
     
-    // Store FT information for later use
-    my_association.ft_long_rd_id = ft_info->long_rd_id;
-    my_association.ft_short_rd_id = ft_info->short_rd_id;
-    my_association.network_id = ft_info->nw_id_32bit;
-    my_association.channel = ft_info->channel;
-    
-    desh_print("FT found:");
-    desh_print("  Long RD ID: %u", ft_info->long_rd_id);
-    desh_print("  Short RD ID: %u", ft_info->short_rd_id);
-    desh_print("  Network ID: %u (0x%08x)", ft_info->nw_id_32bit, ft_info->nw_id_32bit);
-    desh_print("  Channel: %u", ft_info->channel);
+    desh_print("FT, for association:");
+    desh_print("  Long RD ID: %u", ptr_assoc_nbr->long_rd_id);
+    desh_print("  Short RD ID: %u", ptr_assoc_nbr->short_rd_id);
+    desh_print("  Network ID: %u (0x%08x)", ptr_assoc_nbr->nw_id_32bit, ptr_assoc_nbr->nw_id_32bit);
+    desh_print("  Channel: %u", ptr_assoc_nbr->channel);
     
     // Prepare association parameters
     struct dect_phy_mac_associate_params assoc_params = {
-        .tx_power_dbm = 0,
+        .tx_power_dbm = 19,
         .mcs = 0,  // MCS 0 is most robust
-        .target_long_rd_id = target_ft_long_rd_id,
+        .target_long_rd_id = target_long_rd_id,
     };
     
     // Send association request
@@ -334,46 +235,34 @@ int associate_with_ft(uint32_t target_ft_long_rd_id)
     k_sleep(K_SECONDS(15));
     
     // Check if we're now associated
-    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(
-        my_association.ft_short_rd_id);
+    bool is_associated = dect_phy_mac_client_associated_by_target_short_rd_id(ptr_assoc_nbr->short_rd_id);
     
-    if (is_associated) {
-        my_association.is_associated = true;
-        desh_print("Successfully associated with FT!");
-        return 0;
-    } else {
-        desh_error("Association failed or timed out");
-        my_association.is_associated = false;
-        return -ETIMEDOUT;
+    if (is_associated)
+	{
+        desh_print("Successfully associated with FT (long RD ID): %d", ptr_assoc_nbr->long_rd_id);
+        return true;
     }
+	
+	desh_error("Association failed or timed out");
+	return false;
 }
 
-int send_data_to_ft(const char *data)
+int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
 {
-    if (!my_association.is_associated) {
+    if (ptr_assoc_ft == NULL) {
         desh_error("Not associated with any FT. Cannot send data.");
-        return -ENOTCONN;
-    }
-    
-    desh_print("Sending data to FT (long_rd_id=%u)...", my_association.ft_long_rd_id);
-    
-    // Get fresh neighbor info (beacon might have updated)
-    struct dect_phy_mac_nbr_info_list_item *ft_info = 
-        dect_phy_mac_nbr_info_get_by_long_rd_id(my_association.ft_long_rd_id);
-    
-    if (!ft_info) {
-        desh_error("FT no longer in neighbor list. Re-scan needed.");
-        my_association.is_associated = false;
         return -ENODEV;
     }
     
+    desh_print("Sending data to parent FT (long_rd_id=%u)...", ptr_assoc_ft->long_rd_id);
+    
     // Prepare RACH (Random Access Channel) transmission parameters
     struct dect_phy_mac_rach_tx_params rach_params = {
-        .target_long_rd_id = my_association.ft_long_rd_id,
-        .tx_power_dbm = 0,
+        .target_long_rd_id = ptr_assoc_ft->long_rd_id,
+        .tx_power_dbm = 19,
         .mcs = 0,
         .interval_secs = 0,  // 0 = send once, >0 = continuous with interval
-        .get_mdm_temp = 1,   // Set to 1 if you want to include modem temp in data
+        .get_mdm_temp = 0,   // KEEP 0. TEMPERATURE ALREADY SET!
     };
     
     // Copy data to send (max DECT_DATA_MAX_LEN bytes)
@@ -392,57 +281,162 @@ int send_data_to_ft(const char *data)
     return 0;
 }
 
-void print_association_status(void)
+int find_idx_for_msg_type(const char *json, jsmntok_t *t, int tok_count)
 {
-    desh_print("\n=== PT Association Status ===");
-    if (my_association.is_associated) {
-        desh_print("Status: ASSOCIATED");
-        desh_print("FT Long RD ID: %u", my_association.ft_long_rd_id);
-        desh_print("FT Short RD ID: %u", my_association.ft_short_rd_id);
-        desh_print("Network ID: %u (0x%08x)", 
-                   my_association.network_id, my_association.network_id);
-        desh_print("Channel: %u", my_association.channel);
-    } else {
-        desh_print("Status: NOT ASSOCIATED");
-    }
-    desh_print("============================\n");
+	for (int i = 1; i < tok_count; i++)
+	{
+		if (t[i].type == JSMN_STRING &&
+			jsoneq(json, &t[i], "msg_type") == 0 &&
+			t[i+1].type == JSMN_STRING)
+		{
+			return i+1; // Index of string token
+		}
+	}
+	return -1;
 }
+
+int find_idx_for_relay_array(const char *json, jsmntok_t *t, int tok_count)
+{
+    for (int i = 1; i < tok_count; i++)
+	{
+        if (t[i].type == JSMN_STRING &&
+			jsoneq(json, &t[i], "relay_nodes") == 0 &&
+            t[i+1].type == JSMN_ARRAY)
+		{
+            return i+1; // Index of array token
+        }
+    }
+    return -1;
+}
+
+// Generated by Chat
+int append_relay_node_json(
+	const char *in_json,
+	jsmntok_t *tokens,
+	int tok_count,
+	uint32_t my_node_id,
+	char *out_json,
+	size_t out_len)
+{
+	int arr_idx = find_idx_for_relay_array(in_json, tokens, tok_count);
+	if (arr_idx < 0)
+	{
+		return -ENOENT;
+	}
+
+	jsmntok_t *arr = &tokens[arr_idx];
+    int prefix_len = arr->end - 1;
+
+    memcpy(out_json, in_json, prefix_len);
+
+	if (arr->size > 0)
+		snprintf(out_json + prefix_len, out_len - prefix_len, ",%" PRIu32 "]", my_node_id);
+	else
+		snprintf(out_json + prefix_len, out_len - prefix_len, "%" PRIu32 "]", my_node_id);
+
+	strncat(out_json, in_json + arr->end, out_len - strlen(out_json) - 1);
+
+	return 0;
+}
+
+void relay_pt_message(dect_phy_mac_sdu_t sdu_data_item)
+{
+	int err;
+
+	// Get the data message and length
+	uint16_t length = sdu_data_item.message.data_sdu.data_length;
+
+	// Copy into string
+	static char rx_data[DECT_DATA_MAX_LEN];
+	memcpy(rx_data, sdu_data_item.message.data_sdu.data, length);
+	rx_data[length] = '\0';
+
+	// Make sure assoication exists before parsing and sending!
+	if (ptr_assoc_nbr == NULL)
+	{
+		desh_error("No associated FT. Not relaying message...");
+		return;
+	}
+
+	// Use JSON parser to decide if this is supposed to be uplink message
+	static jsmn_parser p;
+	static jsmntok_t t[100];
+
+	jsmn_init(&p);
+	int r = jsmn_parse(&p, rx_data, strlen(rx_data), t, 100);
+
+	// First element is object (the JSON object)
+	if (r < 1 || t[0].type != JSMN_OBJECT)
+	{
+		desh_error("Failed to parse incoming JSON data");
+		return;
+	}
+
+	int str_idx = find_idx_for_msg_type(rx_data, t, r);
+	if (str_idx < 0)
+	{
+		desh_error("Could not find field \"msg_type\". Not relaying message...");
+		return ;
+	}
+
+	char msg_type[16];
+	int size = t[str_idx].end - t[str_idx].start;
+	strncpy(msg_type, rx_data + t[str_idx].start, size);
+	msg_type[t[str_idx].end - t[str_idx].start] = '\0';
+
+	// Check if message type is ft uplink
+	if (strcmp(msg_type, "ft_uplink") != 0)
+	{
+		desh_error("Message is not an FT uplink. Not relaying message...");
+		return;
+	}
+
+	// Append own long RD ID to relay array
+	static char new_data_message[RELAY_JSON_MAX_LEN];
+
+	err = append_relay_node_json(
+		rx_data,
+		t,
+		r,
+		long_rd_id,
+		new_data_message,
+		sizeof(new_data_message)
+	);
+
+	if (err)
+	{
+		desh_error("Failed to append relay node. Not relaying message...");
+		return;
+	}
+
+	// After all cehcks, send data to FT
+	err = send_data_to_ft(new_data_message, ptr_assoc_nbr);
+	if (err)
+	{
+		desh_error("Failed to send data, err %d", err);
+		return;
+	}
+
+	desh_warn("Message successfully relayed!");
+}
+
+// Make device FTPT if true, else remain in PT mode
+void change_rd_mode(bool make_ftpt)
+{
+	if (ftpt_mode == make_ftpt) return;
+
+	if (make_ftpt)
+		desh_warn("RD now operating in FTPT mode.");
+	else
+		desh_warn("RD now opearting in PT mode only.");
+
+	ftpt_mode = make_ftpt;
+}
+
 
 int main(void)
 {
 	int err;
-
-	/* Buttons configuration 
-	int ret;
-
-	for (int i = 0; i < 4; i++)
-	{
-		if (!gpio_is_ready_dt(ptr_buttons[i]))
-		{
-			printk("Error: button device %s is not ready\n", *ptr_buttons[i]->port->name);
-			return 0;
-		}
-
-		ret = gpio_pin_configure_dt(ptr_buttons[i], GPIO_INPUT);
-		if (ret != 0) {
-			printk("Error %d: failed to configure %s pin %d\n",
-				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-			return 0;
-		}
-
-		ret = gpio_pin_interrupt_configure_dt(ptr_buttons[i], GPIO_INT_EDGE_TO_ACTIVE);
-		if (ret != 0) {
-			printk("Error %d: failed to configure interrupt on %s pin %d\n",
-				ret, *ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-			return 0;
-		}
-
-		gpio_init_callback(ptr_buttons_cb_data[i], ptr_buttons_pressed[i], BIT(ptr_buttons[i]->pin));
-		gpio_add_callback(ptr_buttons[i]->port, ptr_buttons_cb_data[i]);
-		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
-	}
-
-	*/
 
 	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
@@ -467,16 +461,18 @@ int main(void)
 	#endif
 
 	/* Important structs for the running device */
-	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Neighbor list
+	struct dect_phy_mac_nbr_info_list_item *ptr_nbrs = dect_phy_mac_nbr_info(); // Reference to neighbor list
 	struct dect_phy_settings current_settings; // The device settings
-
+	// struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
+	// int hop_count_ft = -1; // Additional settings (maybe make into a struct later)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
 	uint32_t long_rd_id = 4567; // Just a random value
-	current_settings.common.transmitter_id = long_rd_id;
-	dect_common_settings_write(&current_settings);
 
+	current_settings.common.transmitter_id = long_rd_id;
+	current_settings.tx.power_dbm = 19;	
+	dect_common_settings_write(&current_settings);
 
 	/* Print current settings */
 	desh_print("Common settings:");
@@ -490,86 +486,172 @@ int main(void)
 		   current_settings.common.band_nbr);
 	desh_print("\n");
 
+	k_sleep(K_SECONDS(10)); // Wait some time 
 
-	err = scan_for_ft_beacons();
-	if (err) 
+	/* BEACON SCAN */
+scanning_period:
+	uint32_t scan_duration_channel = 2; // Seconds of scan per channel
+	bool rx_ongoing = dect_phy_ctrl_rx_is_ongoing();
+
+	err = scan_for_ft_beacons(scan_duration_channel);
+    while (err)
 	{
-		desh_error("Failed to scan for FT beacons, err %d", err);
-		return 0;
-	} 
+		desh_warn("Failed to scan for FT beacons, err %d", err);
+		err = scan_for_ft_beacons(scan_duration_channel);
+		k_sleep(K_SECONDS(1));
+	}
 
-	desh_print("Neigbours discovered after scan:");
+	while (dect_phy_ctrl_rx_is_ongoing())
+	{
+		k_sleep(K_SECONDS(1)); // Sleep for 1 second before checking for free RX
+	}
+
+	// Print the neighbor status before proceeding
+	desh_print("\n=== Discovered FT Devices ===");
+	bool device_found = false;
 	for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-		if (!(ptr_nbrs + i)->reserved) continue;
-
-			desh_print("FT #%d:", i + 1);
-			desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
-			desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
-			desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+		if (!(ptr_nbrs+i)->reserved)
+		{
+			device_found = true;
+			continue;
+		} 
+		
+		desh_print("FT #%d:", i + 1);
+		desh_print("  Long RD ID: %u", (ptr_nbrs + i)->long_rd_id);
+		desh_print("  Short RD ID: %u", (ptr_nbrs + i)->short_rd_id);
+		desh_print("  Channel: %u", (ptr_nbrs + i)->channel);
+		desh_print("  RSSI-2: %d", ptr_nbrs->rssi_2); // RSSI-2 for last beacon received
 	}
-	
-	
+	if (!device_found) desh_error("No FT devices found!");
+	desh_print("=============================\n");
+
 	k_sleep(K_SECONDS(2));
-	struct dect_phy_mac_nbr_info_list_item *nbr_list = dect_phy_mac_nbr_info();
-    uint32_t target_ft_long_rd_id = 0;
 
 
-	// While no FT found, keep scanning
-	while(target_ft_long_rd_id == 0) {
-		desh_print("\n=== Discovered FT Devices ===");
-			for (int i = 0; i < DECT_PHY_MAC_MAX_NEIGBORS; i++) {
-				if ((nbr_list + i)->reserved) {
-					desh_print("FT #%d:", i + 1);
-					desh_print("  Long RD ID: %u", (nbr_list + i)->long_rd_id);
-					desh_print("  Short RD ID: %u", (nbr_list + i)->short_rd_id);
-					desh_print("  Channel: %u", (nbr_list + i)->channel);
-					
-					// Use first discovered FT
-					if (target_ft_long_rd_id == 0) {
-						target_ft_long_rd_id = (nbr_list + i)->long_rd_id;
-					}
-				}
-			}
-			desh_print("=============================\n");
-		if (target_ft_long_rd_id == 0) {
-        	desh_error("No FT devices found! Retrying...");
-			k_sleep(K_SECONDS(10));
-    	}
+	/* ASSOCIATION */
+	desh_print("=== Finding Best Association Neighbor ===");
+	ptr_assoc_nbr = find_best_association(ptr_nbrs); // assoc_nbr now points to the associated neigbor in neighbor list
+
+	if (!ptr_assoc_nbr)
+	{
+		desh_print("No association neighbors found! Going back to scanning!");
+		goto scanning_period; // If no neighbors, no association, so we just skip.
 	}
-    
-	err = associate_with_ft(target_ft_long_rd_id);
-    if (err) {
+
+	desh_print("Found best neighbor with long RD ID: %d", ptr_assoc_nbr->long_rd_id);
+
+	uint16_t *current_assoc_channel = NULL;
+	
+	desh_print("\n=== Association Process ===");
+	bool association_status = associate_with_ft(ptr_assoc_nbr, current_assoc_channel);
+    if (!association_status) {
         desh_error("Association failed");
-        return 0;
+        goto scanning_period;
     }
 
-	print_association_status();
+	k_sleep(K_SECONDS(5));
 
-	k_sleep(K_SECONDS(2));
-	int counter = 0;
-	char message[DECT_DATA_MAX_LEN];
 
-	while (1) {
-        // Send single message
-        snprintf(message, sizeof(message), "Hello from PT! Counter: %d", counter++);
-        err = send_data_to_ft(message);
-        
-        if (err) {
-            desh_error("Failed to send data. Re-scanning...");
-            
-            // Try to re-associate
-            scan_for_ft_beacons();
-            k_sleep(K_SECONDS(2));
-            associate_with_ft(target_ft_long_rd_id);
-        }
-        
-        k_sleep(K_SECONDS(10));  // Send every 10 seconds
-        
-        // Optional: Print status every few iterations
-        if (counter % 5 == 0) {
-            print_association_status();
-            dect_phy_mac_client_status_print();
-        }
-    }
+	/* BEACON START */
+	uint8_t beacon_duration = 100;
+beacon_period:
+	register_assoc_resp_callback(change_rd_mode);
+	bool beacon_started = false;
+
+	if(!beacon_started)
+	{		
+		struct dect_phy_mac_beacon_start_params params =
+		{
+			.tx_power_dbm = 19,
+			.beacon_channel = 0,
+		};
+
+		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+		desh_print("Beacon returned: %d", ret);
+		if (ret)
+		{
+			desh_print("Cannot start beacon, err %d", ret);
+		}
+		else
+		{
+			desh_print("Beacon starting");
+			beacon_started = true;
+		}
+	}
+
+	k_sleep(K_SECONDS(beacon_duration)); // Time for scanning and transmitting beacon
+	
+
+	/* FINAL MODE (TRANSMIT OR RELAY) */
+	int msg_counter = 0;
+	int transmission_before_new_beacon = 15;
+
+	desh_warn("Starting to send data now!");
+
+	while (1)
+	{
+		if (ftpt_mode)
+			register_rx_callback(relay_pt_message); // Registers the local function as callback for whenever device receive pt data
+		else
+		{
+			register_rx_callback(NULL);
+			dect_phy_mac_ctrl_cluster_beacon_stop(DECT_PHY_MAC_CTRL_BEACON_STOP_CAUSE_USER_INITIATED);
+		}
+
+		/* TRANSMIT DATA */
+		// Get temperature
+		int mdm_temperature = dect_phy_ctrl_modem_temperature_get();
+
+		// String data to send
+		char message[40];
+		sprintf(message, "Hello from PT! Counter: %d", msg_counter++);
+
+		// Actual tx message to send
+		char tx_message[DECT_DATA_MAX_LEN];
+		if (mdm_temperature == NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED)
+		{
+			sprintf(tx_message,
+				"{\"msg_type\":\"ft_uplink\","
+				"\"transmitter_long_id\":%d,"
+				"\"msg\":\"%s\","
+				"\"m_tmp\":\"N/A\""
+				"\"relay_nodes\":[]}",
+				current_settings.common.transmitter_id, message
+			);
+		}
+		else
+		{
+			sprintf(tx_message,
+				"{\"msg_type\":\"ft_uplink\","
+				"\"transmitter_long_id\":%d,"
+				"\"msg\":\"%s\","
+				"\"m_tmp\":%d,"
+				"\"relay_nodes\":[]}",
+				current_settings.common.transmitter_id, message, mdm_temperature
+			);
+		}
+
+		err = send_data_to_ft(tx_message, ptr_assoc_nbr);
+		if (err) {
+			desh_error("Failed to send data, err %d", err);
+			break;
+		}
+		
+		if (--transmission_before_new_beacon <= 0)
+		{
+			goto beacon_period;
+			beacon_duration = 10;
+		}
+
+		k_sleep(K_SECONDS(10));
+	}
+
+end_of_life:
+	desh_print("End of RD operation.");
+	while(1)
+	{
+		k_sleep(K_SECONDS(1));
+	}
+
 	return 0;
 }

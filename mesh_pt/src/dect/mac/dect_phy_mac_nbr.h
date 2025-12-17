@@ -31,6 +31,8 @@ struct dect_phy_mac_nbr_info_list_item {
 
 	dect_phy_mac_cluster_beacon_t beacon_msg;
 	dect_phy_mac_random_access_resource_ie_t ra_ie; /* Supporting only one RA IE */
+
+	int16_t rssi_2; // CUSTOM SHIT
 };
 
 struct dect_phy_mac_nbr_info_list_item *
@@ -44,6 +46,7 @@ bool dect_phy_mac_nbr_info_store_n_update(uint64_t const *rcv_time, uint16_t cha
 					  uint32_t long_rd_id, uint16_t short_rd_id,
 					  dect_phy_mac_cluster_beacon_t *beacon_msg,
 					  dect_phy_mac_random_access_resource_ie_t *ra_ie,
+					  int16_t rssi_2,
 					  bool print_update);
 
 bool dect_phy_mac_nbr_is_in_channel(uint16_t channel);
