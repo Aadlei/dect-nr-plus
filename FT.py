@@ -36,7 +36,8 @@ class DeviceDataParser:
                             "payload": {
                                 "msg_type": data.get('msg_type'),
                                 "msg": data.get('msg'),
-                                "m_tmp": data.get('m_tmp')
+                                "m_tmp": data.get('m_tmp'),
+                                "relay_nodes": data.get('relay_nodes', [])
                             }
                         }
                         return structured_data
@@ -76,6 +77,7 @@ if __name__ == '__main__':
                     print(f"   Message: {structured_data['payload']['msg']}")
                     print(f"   Temperature: {structured_data['payload']['m_tmp']}°C")
                     print(f"   Type: {structured_data['payload']['msg_type']}")
+                    print(f"   Relay Nodes: {structured_data['payload']['relay_nodes']}")
                     print(f"   Time: {time.strftime('%H:%M:%S', time.localtime(structured_data['timestamp']))}")
                     print("-" * 40)
                     
@@ -83,8 +85,6 @@ if __name__ == '__main__':
                     topic = f"devices/tx{structured_data['transmitter_id']}/rx{structured_data['receiver_id']}"
                     mqtt_client.publish(topic, json.dumps(structured_data))
                     print(f"📤 Published to {topic}")
-            
-            time.sleep(0.5)
             
     except KeyboardInterrupt:
         print("Exiting...")
