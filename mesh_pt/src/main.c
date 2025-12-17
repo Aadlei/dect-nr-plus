@@ -134,7 +134,7 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 // Global variables for high-level device information
 struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr = NULL;
-uint32_t long_rd_id = 2003; // THIS DEVICE LONG RD ID
+uint32_t long_rd_id = 8000; // THIS DEVICE LONG RD ID
 bool ftpt_mode = false;
 #define RELAY_JSON_MAX_LEN 256
 
@@ -245,7 +245,6 @@ bool associate_with_ft(struct dect_phy_mac_nbr_info_list_item *ptr_assoc_nbr, ui
 	
 	desh_error("Association failed or timed out");
 	return false;
-    
 }
 
 int send_data_to_ft(const char *data, struct dect_phy_mac_nbr_info_list_item *ptr_assoc_ft)
@@ -470,6 +469,7 @@ int main(void)
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
 	current_settings.common.transmitter_id = long_rd_id;
+	current_settings.tx.power_dbm = 19;	
 	dect_common_settings_write(&current_settings);
 
 	/* Print current settings */
