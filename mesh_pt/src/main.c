@@ -468,6 +468,8 @@ int main(void)
 
 	/* Read and write current settings */
 	dect_common_settings_read(&current_settings);
+	uint32_t long_rd_id = 4567; // Just a random value
+
 	current_settings.common.transmitter_id = long_rd_id;
 	current_settings.tx.power_dbm = 19;	
 	dect_common_settings_write(&current_settings);

@@ -25,6 +25,17 @@
 #include "dect_phy_mac.h"
 
 /**************************************************************************************************/
+// Callback type definition
+typedef void (*dect_phy_mac_data_received_cb_t)(const uint8_t *data, uint32_t length);
+
+// Global callback pointer
+static dect_phy_mac_data_received_cb_t g_data_received_callback = NULL;
+
+// Function to register the callback
+void dect_phy_mac_register_data_callback(dect_phy_mac_data_received_cb_t callback)
+{
+    g_data_received_callback = callback;
+}
 
 static void dect_phy_mac_message_print(dect_phy_mac_message_type_t message_type,
 				       dect_phy_mac_message_t *message)
@@ -432,6 +443,16 @@ bool dect_phy_mac_handle(struct dect_phy_commmon_op_pdc_rcv_params *rcv_params)
 			if (print) {
 				dect_phy_mac_sdu_print(sdu_list_item, ++sdu_count);
 			}
+
+			// For the callback that goes to main (on receive)
+			if (sdu_list_item->message_type == DECT_PHY_MAC_MESSAGE_TYPE_DATA_SDU) {
+				if (g_data_received_callback != NULL) {
+					g_data_received_callback(
+						sdu_list_item->message.data_sdu.data,
+						sdu_list_item->message.data_sdu.data_length
+					);
+				}
+            }
 
 			if (sdu_list_item->message_type ==
 			    DECT_PHY_MAC_MESSAGE_TYPE_CLUSTER_BEACON) {

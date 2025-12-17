@@ -34,6 +34,8 @@
 #include "dect_app_time.h"
 #include "dect_phy_mac_nbr_bg_scan.h"
 
+#include <dect_phy_mac.h>
+
 #include <modem/nrf_modem_lib.h>
 #include <modem/nrf_modem_lib_trace.h>
 
@@ -50,7 +52,6 @@ BUILD_ASSERT(IS_ENABLED(CONFIG_SHELL_BACKEND_SERIAL),
 	     "CONFIG_SHELL_BACKEND_SERIAL shell backend must be enabled");
 
 /***** Work queue and work item definitions *****/
-
 #if defined(CONFIG_DESH_STARTUP_CMDS)
 #define DESH_COMMON_WORKQUEUE_STACK_SIZE 4096
 #define DESH_COMMON_WORKQ_PRIORITY 5
@@ -79,9 +80,25 @@ struct k_work_q desh_common_work_q;
 #error "Unsupported board: sw3 devicetree alias is not defined"
 #endif
 
+static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET(SW0_NODE, gpios);
+static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET(SW1_NODE, gpios);
+static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET(SW2_NODE, gpios);
+static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET(SW3_NODE, gpios);
+
+static struct gpio_callback button_1_cb_data;
+static struct gpio_callback button_2_cb_data;
+static struct gpio_callback button_3_cb_data;
+static struct gpio_callback button_4_cb_data;
+
+
+static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
+static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
+
+
 /* Global variables */
 const struct shell *desh_shell;
 static uint16_t device_id;
+bool beacon_started = false;
 
 char desh_at_resp_buf[DESH_AT_CMD_RESPONSE_MAX_LEN];
 K_MUTEX_DEFINE(desh_at_resp_buf_mutex);
@@ -148,81 +165,19 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 	__ASSERT(false, "Modem crash detected, halting application execution");
 }
+static struct k_work button_1_work;
 
-/*
-static void reset_reason_str_get(char *str, uint32_t reason)
+static void button_1_work_handler(struct k_work *work)
 {
-	size_t len;
-
-	*str = '\0';
-
-	if (reason & NRFX_RESET_REASON_RESETPIN_MASK) {
-		(void)strcat(str, "PIN reset | ");
-	}
-	if (reason & NRFX_RESET_REASON_DOG_MASK) {
-		(void)strcat(str, "watchdog | ");
-	}
-	if (reason & NRFX_RESET_REASON_OFF_MASK) {
-		(void)strcat(str, "wakeup from power-off | ");
-	}
-	if (reason & NRFX_RESET_REASON_DIF_MASK) {
-		(void)strcat(str, "debug interface wakeup | ");
-	}
-	if (reason & NRFX_RESET_REASON_SREQ_MASK) {
-		(void)strcat(str, "software | ");
-	}
-	if (reason & NRFX_RESET_REASON_LOCKUP_MASK) {
-		(void)strcat(str, "CPU lockup | ");
-	}
-	if (reason & NRFX_RESET_REASON_CTRLAP_MASK) {
-		(void)strcat(str, "control access port | ");
-	}
-
-	len = strlen(str);
-	if (len == 0) {
-		(void)strcpy(str, "power-on reset");
-	} else {
-		str[len - 3] = '\0';
-	}
+    desh_print("dect-phy-mac status:");
+    dect_phy_mac_cluster_beacon_status_print();
+    dect_phy_mac_client_status_print();
+    dect_phy_mac_nbr_status_print();
 }
-
-static void desh_print_reset_reason(void)
-{
-	uint32_t reset_reason;
-	char reset_reason_str[128];
-
-	// Read RESETREAS register value and clear current reset reason(s).
-	reset_reason = nrfx_reset_reason_get();
-	nrfx_reset_reason_clear(reset_reason);
-
-	reset_reason_str_get(reset_reason_str, reset_reason);
-
-	printk("\nReset reason: %s\n", reset_reason_str);
-}
-*/
-
-/* Button crap */
-// Button 1: 
-// Button 2:
-// Button 3:
-// Button 4:
-
-static const struct gpio_dt_spec button_1 = GPIO_DT_SPEC_GET_OR(SW0_NODE, gpios, {0});
-static const struct gpio_dt_spec button_2 = GPIO_DT_SPEC_GET_OR(SW1_NODE, gpios, {0});
-static const struct gpio_dt_spec button_3 = GPIO_DT_SPEC_GET_OR(SW2_NODE, gpios, {0});
-static const struct gpio_dt_spec button_4 = GPIO_DT_SPEC_GET_OR(SW3_NODE, gpios, {0});
-
-static struct gpio_callback button_1_cb_data;
-static struct gpio_callback button_2_cb_data;
-static struct gpio_callback button_3_cb_data;
-static struct gpio_callback button_4_cb_data;
-
-static const struct gpio_dt_spec *ptr_buttons[] = { &button_1, &button_2, &button_3, &button_4 };
-static struct gpio_callback *ptr_buttons_cb_data[] = { &button_1_cb_data, &button_2_cb_data, &button_3_cb_data, &button_4_cb_data };
 
 void button_1_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
 {
-	printk("Button 1 pressed\n");
+	k_work_submit(&button_1_work);
 }
 
 void button_2_pressed(const struct device *dev, struct gpio_callback *cb, uint32_t pins)
@@ -244,6 +199,42 @@ static const void (*ptr_buttons_pressed[])(const struct device *dev, struct gpio
 {
 	&button_1_pressed, &button_2_pressed, &button_3_pressed, &button_4_pressed
 };
+
+static void data_received_handler(const uint8_t *data, uint32_t length)
+{
+    char received_str[DECT_DATA_MAX_LEN];
+    
+    // Copy to null-terminated string
+    uint32_t copy_len = MIN(length, DECT_DATA_MAX_LEN - 1);
+    memcpy(received_str, data, copy_len);
+    received_str[copy_len] = '\0';
+    
+    printk("\n*** CALLBACK: Received data ***\n");
+    printk("Length: %u\n", length);
+    printk("Data: %s\n", received_str);
+    
+    // Parse JSON if needed
+    char *data_start = strstr(received_str, "\"data\":\"");
+    if (data_start) {
+        data_start += 8; // Skip past "data":"
+        char *data_end = strchr(data_start, '"');
+        if (data_end) {
+            *data_end = '\0';
+            printk("Parsed message: %s\n", data_start);
+        }
+    }
+    
+    char *temp_start = strstr(received_str, "\"m_tmp\":\"");
+    if (temp_start) {
+        temp_start += 9; // Skip past "m_tmp":"
+        char *temp_end = strchr(temp_start, '"');
+        if (temp_end) {
+            *temp_end = '\0';
+            printk("Temperature: %s°C\n", temp_start);
+        }
+    }
+    printk("*******************************\n\n");
+}
 
 int main(void)
 {
@@ -279,6 +270,8 @@ int main(void)
 		printk("Set up button at %s pin %d\n", ptr_buttons[i]->port->name, ptr_buttons[i]->pin);
 	}
 
+	k_work_init(&button_1_work, button_1_work_handler);
+
 	/* Configuration setup */
 	desh_shell = shell_backend_uart_get_ptr();
 
@@ -304,19 +297,37 @@ int main(void)
 	hwinfo_get_device_id((void *)&device_id, sizeof(device_id));
 	printk("DECT NR+ Started. Device id: %u\n", device_id);
 
+	
+	/* Read and write current settings */
+	struct dect_phy_settings current_settings; // The device settings
+	dect_common_settings_read(&current_settings);
+	uint32_t long_rd_id = 9876; // Just a random value
+	current_settings.common.transmitter_id = long_rd_id;
+	dect_common_settings_write(&current_settings);
+
+	printk("Current transmitter id (long RD ID): %u\n",
+	       current_settings.common.transmitter_id);
+	printk("Current band number: %d\n", current_settings.common.band_nbr);
+	printk("Network id: %u\n", current_settings.common.network_id);
+  
 	while(1) {
-		struct dect_phy_mac_beacon_start_params params = {
-			.tx_power_dbm = 0,
-			.beacon_channel = 1665,
-		};
-		int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
-		printk("Beacon returned: %d\n", ret);
-		if (ret) {
-			printk("Cannot start beacon, err %d", ret);
-		} else {
-			printk("Beacon starting");
+		if(!beacon_started) {		
+			struct dect_phy_mac_beacon_start_params params = {
+				.tx_power_dbm = 0,
+				.beacon_channel = 1665,
+			};
+			int ret = dect_phy_mac_ctrl_cluster_beacon_start(&params);
+			printk("Beacon returned: %d\n", ret);
+			if (ret) {
+				printk("Cannot start beacon, err %d", ret);
+			} else {
+				printk("Beacon starting");
+				beacon_started = true;
+				dect_phy_mac_register_data_callback(data_received_handler);
+			}
 		}
 
+		printk("Sleeping for 30 seconds...\n");
 		k_sleep(K_SECONDS(30));
 	}
 
