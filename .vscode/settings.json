@@ -2,5 +2,8 @@
     "files.associations": {
         "desh_print.h": "c",
         "log.h": "c"
-    }
+    },
+    "nrf-connect.applications": [
+        "${workspaceFolder}\\mesh_ft"
+    ]
 }
