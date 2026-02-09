@@ -29,6 +29,8 @@
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
 
+#include "spi.h"
+
 LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 /* Modem fault handler */
@@ -46,7 +48,8 @@ static struct net_if *dect_iface;
 /* Network management callback */
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
-
+static void check_spi_image_work_handler(struct k_work *work);
+ K_WORK_DELAYABLE_DEFINE(check_spi_image_work, check_spi_image_work_handler);
 /* Application state */
 static bool dect_connected;
 static uint32_t message_counter;
@@ -108,6 +111,20 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 	dk_set_led_off(DK_LED2);
 }
 #endif
+
+static void check_spi_image_work_handler(struct k_work *work)
+{
+	if (spi_slave_is_new_image_available()) {
+		uint8_t *image_data = spi_slave_get_image_buffer();
+		size_t image_size = spi_slave_get_image_size();
+
+		LOG_INF("New image received over SPI: size=%zu bytes", image_size);
+		
+		spi_slave_clear_image_flag();
+	}
+
+    k_work_schedule(&check_spi_image_work, K_SECONDS(1));
+}
 
 static void hello_dect_mac_resolve_peer_address(void)
 {
@@ -396,8 +413,21 @@ int main(void)
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 	LOG_INF("Device type: %s", DEVICE_TYPE_STR);
 
+	err = spi_slave_init();
+	if (err) {
+		LOG_ERR("Failed to initialize SPI slave: %d", err);
+	} else {
+		// Start the thread AFTER initialization
+		err = spi_slave_start_thread();
+		if (err) {
+			LOG_ERR("Failed to start SPI thread: %d", err);
+		}
+	}
+
 	/* Set hostname based on device type */
 	hello_dect_mac_set_hostname();
+
+	k_work_schedule(&check_spi_image_work, K_SECONDS(5));
 
 	/* Setup network management callbacks for L4 connected/disconnected events */
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
