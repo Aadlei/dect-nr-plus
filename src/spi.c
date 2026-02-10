@@ -55,6 +55,16 @@ static struct spi_buf_set rx_buf_set = {
     .buffers = &rx_buf,
     .count = 1
 };
+static bool find_jpeg_end(uint8_t *buffer, size_t len, size_t *end_pos)
+{
+    for (size_t i = 0; i < len - 1; i++) {
+        if (buffer[i] == 0xFF && buffer[i + 1] == 0xD9) {
+            *end_pos = i + 2;  // Position after EOI marker
+            return true;
+        }
+    }
+    return false;
+}
 
 int spi_slave_init(void) 
 {
@@ -81,6 +91,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
 {
     const struct device *spi_dev;
     int ret;
+    size_t eoi_pos;
     
     ARG_UNUSED(p1);
     ARG_UNUSED(p2);
@@ -112,9 +123,10 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         if (ret > 0) {
             // Check for JPEG header (start of new image)
             if (rx_buffer[0] == 0xFF && rx_buffer[1] == 0xD8) {
-                LOG_INF("New image started!");
+                LOG_INF("=== New image started ===");
                 total_received = 0;
                 receiving_image = true;
+                memset(image_buffer, 0, MAX_IMAGE_SIZE);
             }
             
             if (receiving_image) {
@@ -125,24 +137,34 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
                     
                     LOG_INF("Chunk %d bytes (total: %zu/%d)",
                             ret, total_received, MAX_IMAGE_SIZE);
-
-                    LOG_INF("Chunk data (first 16 bytes): %02X %02X %02X %02X %02X %02X %02X %02X "
-                            "%02X %02X %02X %02X %02X %02X %02X %02X",
-                            rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3],
-                            rx_buffer[4], rx_buffer[5], rx_buffer[6], rx_buffer[7],
-                            rx_buffer[8], rx_buffer[9], rx_buffer[10], rx_buffer[11],
-                            rx_buffer[12], rx_buffer[13], rx_buffer[14], rx_buffer[15]);
                     
-                    // Image complete when we receive less than full chunk
-                    if (ret < CHUNK_SIZE) {
+                    // Check if this chunk contains JPEG EOI marker
+                    if (find_jpeg_end(rx_buffer, ret, &eoi_pos)) {
+                        // Adjust total to actual image size
+                        size_t actual_size = (total_received - ret) + eoi_pos;
+                        
                         receiving_image = false;
                         
                         k_mutex_lock(&image_mutex, K_FOREVER);
-                        image_size = total_received;
+                        image_size = actual_size;
                         new_image_available = true;
                         k_mutex_unlock(&image_mutex);
                         
-                        LOG_INF("=== Image complete! %zu bytes ===", total_received);
+                        LOG_INF("=== Image complete! ===");
+                        LOG_INF("Total size: %zu bytes", actual_size);
+                        
+                        // Print entire image as hex dump (first 128 bytes)
+                        LOG_INF("First 128 bytes:");
+                        LOG_HEXDUMP_INF(image_buffer, 
+                                       (actual_size > 128) ? 128 : actual_size, 
+                                       "Image data:");
+                        
+                        // Print last 32 bytes (should contain FF D9)
+                        if (actual_size > 32) {
+                            LOG_INF("Last 32 bytes:");
+                            LOG_HEXDUMP_INF(image_buffer + actual_size - 32, 32,
+                                           "Image end:");
+                        }
                     }
                 } else {
                     LOG_ERR("Image too large! Discarding.");
@@ -204,4 +226,40 @@ int spi_slave_start_thread(void)
     k_thread_name_set(spi_slave_thread_id, "spi_slave");
     LOG_INF("SPI slave thread started");
     return 0;
+}
+
+void spi_slave_send_image_to_uart(void)
+{
+    size_t size;
+    
+    k_mutex_lock(&image_mutex, K_FOREVER);
+    
+    if (!new_image_available) {
+        k_mutex_unlock(&image_mutex);
+        LOG_WRN("No image available to send");
+        return;
+    }
+    
+    size = image_size;
+    k_mutex_unlock(&image_mutex);
+    
+    // Send markers and data
+    printk("<<<IMAGE_START>>>\n");
+    printk("SIZE:%zu\n", size);
+    
+    // Send image as hex (2 chars per byte)
+    for (size_t i = 0; i < size; i++) {
+        printk("%02X", image_buffer[i]);
+        if ((i + 1) % 64 == 0) {
+            printk("\n");  // Newline every 64 bytes (128 hex chars)
+        }
+    }
+    
+    if (size % 64 != 0) {
+        printk("\n");
+    }
+    
+    printk("<<<IMAGE_END>>>\n");
+    
+    LOG_INF("Image sent to UART (%zu bytes)", size);
 }

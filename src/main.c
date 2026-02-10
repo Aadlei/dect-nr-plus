@@ -114,14 +114,16 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 
 static void check_spi_image_work_handler(struct k_work *work)
 {
-	if (spi_slave_is_new_image_available()) {
-		uint8_t *image_data = spi_slave_get_image_buffer();
-		size_t image_size = spi_slave_get_image_size();
-
-		LOG_INF("New image received over SPI: size=%zu bytes", image_size);
-		
-		spi_slave_clear_image_flag();
-	}
+    if (spi_slave_is_new_image_available()) {
+        size_t image_size = spi_slave_get_image_size();
+        
+        LOG_INF("New image received: %zu bytes", image_size);
+        
+        // Send to laptop via UART
+        spi_slave_send_image_to_uart();
+        
+        spi_slave_clear_image_flag();
+    }
 
     k_work_schedule(&check_spi_image_work, K_SECONDS(1));
 }
