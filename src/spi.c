@@ -6,24 +6,27 @@
 
 LOG_MODULE_REGISTER(spi_slave, LOG_LEVEL_INF);
 
-#define SPI_NODE DT_NODELABEL(spi3)
-#define TX_BUFFER_SIZE 60000
-#define RX_BUFFER_SIZE 60000
+#define SPI_NODE DT_NODELABEL(spi2)
+#define TX_BUFFER_SIZE 1024
+#define CHUNK_SIZE 4096
+#define MAX_IMAGE_SIZE 32768 
 
-K_THREAD_STACK_DEFINE(spi_slave_stack, 2048);
+K_THREAD_STACK_DEFINE(spi_slave_stack, 8192);
 static struct k_thread spi_slave_thread_data;
 static k_tid_t spi_slave_thread_id;
 
-static uint8_t tx_buffer[TX_BUFFER_SIZE];
-static uint8_t rx_buffer[RX_BUFFER_SIZE];
-static uint8_t image_buffer[TX_BUFFER_SIZE];
+static uint8_t tx_buffer[CHUNK_SIZE];
+static uint8_t rx_buffer[CHUNK_SIZE];
+static uint8_t image_buffer[MAX_IMAGE_SIZE];  // Full image accumulator
+
+static size_t total_received = 0;
 static size_t image_size = 0;
 static bool new_image_available = false;
-
+static bool receiving_image = false;
 K_MUTEX_DEFINE(image_mutex);
 
 static struct spi_config spi_cfg = {
-    .frequency = 1000000,
+    .frequency = 8000000,
     .operation = SPI_OP_MODE_SLAVE | 
                  SPI_TRANSFER_MSB  | 
                  SPI_WORD_SET(8)   |
@@ -35,7 +38,7 @@ static struct spi_config spi_cfg = {
 
 static struct spi_buf tx_buf = {
     .buf = tx_buffer,
-    .len = TX_BUFFER_SIZE
+    .len = CHUNK_SIZE
 };
 
 static struct spi_buf_set tx_buf_set = {
@@ -45,7 +48,7 @@ static struct spi_buf_set tx_buf_set = {
 
 static struct spi_buf rx_buf = {
     .buf = rx_buffer,
-    .len = RX_BUFFER_SIZE
+    .len = CHUNK_SIZE
 };
 
 static struct spi_buf_set rx_buf_set = {
@@ -87,13 +90,8 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     
     spi_dev = DEVICE_DT_GET(SPI_NODE);
     
-    if (spi_dev == NULL) {
-        LOG_ERR("Device is NULL in thread!");
-        return;
-    }
-    
     if (!device_is_ready(spi_dev)) {
-        LOG_ERR("Device not ready in thread");
+        LOG_ERR("SPI device not ready");
         return;
     }
     
@@ -101,8 +99,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     
     while (1) 
     {
-        memset(tx_buffer, 0, TX_BUFFER_SIZE);
-        memset(rx_buffer, 0, RX_BUFFER_SIZE);
+        memset(rx_buffer, 0, CHUNK_SIZE);
         
         ret = spi_transceive(spi_dev, &spi_cfg, &tx_buf_set, &rx_buf_set);
         
@@ -113,19 +110,52 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         }
         
         if (ret > 0) {
-            LOG_INF("Received %d bytes", ret);
-            LOG_HEXDUMP_INF(rx_buffer, ret, "RX:");
-            
-            k_mutex_lock(&image_mutex, K_FOREVER);
-            if (ret <= TX_BUFFER_SIZE) {
-                memcpy(image_buffer, rx_buffer, ret);
-                image_size = ret;
-                new_image_available = true;
+            // Check for JPEG header (start of new image)
+            if (rx_buffer[0] == 0xFF && rx_buffer[1] == 0xD8) {
+                LOG_INF("New image started!");
+                total_received = 0;
+                receiving_image = true;
             }
-            k_mutex_unlock(&image_mutex);
+            
+            if (receiving_image) {
+                // Accumulate chunk into image buffer
+                if (total_received + ret <= MAX_IMAGE_SIZE) {
+                    memcpy(image_buffer + total_received, rx_buffer, ret);
+                    total_received += ret;
+                    
+                    LOG_INF("Chunk %d bytes (total: %zu/%d)",
+                            ret, total_received, MAX_IMAGE_SIZE);
+
+                    LOG_INF("Chunk data (first 16 bytes): %02X %02X %02X %02X %02X %02X %02X %02X "
+                            "%02X %02X %02X %02X %02X %02X %02X %02X",
+                            rx_buffer[0], rx_buffer[1], rx_buffer[2], rx_buffer[3],
+                            rx_buffer[4], rx_buffer[5], rx_buffer[6], rx_buffer[7],
+                            rx_buffer[8], rx_buffer[9], rx_buffer[10], rx_buffer[11],
+                            rx_buffer[12], rx_buffer[13], rx_buffer[14], rx_buffer[15]);
+                    
+                    // Image complete when we receive less than full chunk
+                    if (ret < CHUNK_SIZE) {
+                        receiving_image = false;
+                        
+                        k_mutex_lock(&image_mutex, K_FOREVER);
+                        image_size = total_received;
+                        new_image_available = true;
+                        k_mutex_unlock(&image_mutex);
+                        
+                        LOG_INF("=== Image complete! %zu bytes ===", total_received);
+                    }
+                } else {
+                    LOG_ERR("Image too large! Discarding.");
+                    receiving_image = false;
+                    total_received = 0;
+                }
+            }
         }
+        
+        k_sleep(K_MSEC(100));
     }
 }
+
 
 uint8_t* spi_slave_get_image_buffer(void) 
 {
