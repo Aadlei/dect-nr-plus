@@ -13,6 +13,5 @@ size_t spi_slave_get_image_size(void);
 bool spi_slave_is_new_image_available(void);
 void spi_slave_clear_image_flag(void);
 int spi_slave_start_thread(void);
-void spi_slave_send_image_to_uart(void);
 
 #endif // SPI_SLAVE_H

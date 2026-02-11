@@ -227,39 +227,3 @@ int spi_slave_start_thread(void)
     LOG_INF("SPI slave thread started");
     return 0;
 }
-
-void spi_slave_send_image_to_uart(void)
-{
-    size_t size;
-    
-    k_mutex_lock(&image_mutex, K_FOREVER);
-    
-    if (!new_image_available) {
-        k_mutex_unlock(&image_mutex);
-        LOG_WRN("No image available to send");
-        return;
-    }
-    
-    size = image_size;
-    k_mutex_unlock(&image_mutex);
-    
-    // Send markers and data
-    printk("<<<IMAGE_START>>>\n");
-    printk("SIZE:%zu\n", size);
-    
-    // Send image as hex (2 chars per byte)
-    for (size_t i = 0; i < size; i++) {
-        printk("%02X", image_buffer[i]);
-        if ((i + 1) % 64 == 0) {
-            printk("\n");  // Newline every 64 bytes (128 hex chars)
-        }
-    }
-    
-    if (size % 64 != 0) {
-        printk("\n");
-    }
-    
-    printk("<<<IMAGE_END>>>\n");
-    
-    LOG_INF("Image sent to UART (%zu bytes)", size);
-}

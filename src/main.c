@@ -30,6 +30,7 @@
 #include <net/dect/dect_net_l2.h>
 
 #include "spi.h"
+#include "uart.h"
 
 LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -115,12 +116,18 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 static void check_spi_image_work_handler(struct k_work *work)
 {
     if (spi_slave_is_new_image_available()) {
+		const uint8_t *image_data = spi_slave_get_image_buffer();
         size_t image_size = spi_slave_get_image_size();
         
         LOG_INF("New image received: %zu bytes", image_size);
         
-        // Send to laptop via UART
-        spi_slave_send_image_to_uart();
+        // Send to laptop via uart
+        int ret = uart_send_image(image_data, image_size);
+        if (ret != 0) {
+            LOG_ERR("Failed to send image via uart: %d", ret);
+        } else {
+            LOG_INF("Image forwarded to uart");
+        }
         
         spi_slave_clear_image_flag();
     }
@@ -425,6 +432,13 @@ int main(void)
 			LOG_ERR("Failed to start SPI thread: %d", err);
 		}
 	}
+
+	err = uart_data_init();
+    if (err) {
+        LOG_ERR("Failed to initialize uart: %d", err);
+    } else {
+        LOG_INF("uart ready for image transfer");
+    }
 
 	/* Set hostname based on device type */
 	hello_dect_mac_set_hostname();

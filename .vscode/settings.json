@@ -5,5 +5,8 @@
     },
     "nrf-connect.applications": [
         "${workspaceFolder}\\mesh_ft"
-    ]
+    ],
+    "nrf-connect.debugging.bindings": {
+        "${workspaceFolder}/build/DectNR+": "Launch DectNR+/build/DectNR+"
+    }
 }
