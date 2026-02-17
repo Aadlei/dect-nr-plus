@@ -49,6 +49,7 @@ static struct net_if *dect_iface;
 /* Network management callback */
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
+static struct net_mgmt_event_callback dect_event_cb;
 static void check_spi_image_work_handler(struct k_work *work);
  K_WORK_DELAYABLE_DEFINE(check_spi_image_work, check_spi_image_work_handler);
 /* Application state */
@@ -323,6 +324,8 @@ static void hello_dect_mac_rx_thread(void)
 			LOG_INF("Received %d bytes from %s: %s",
 				ret, addr_str, buffer);
 		}
+
+
 	}
 }
 
@@ -415,6 +418,73 @@ static void hello_dect_mac_set_hostname(void)
 	}
 }
 
+static void dect_scan_beacons(void)
+{
+	int ret;
+	LOG_INF("Scanning for DECT beacons...");
+	struct dect_scan_params scan_params =  {
+		.channel_scan_time_ms = 500,
+		.channel_count = 0,  			/* Scan all channels */
+		.band = 0  						/* Use default band */
+	};	
+
+	ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params));
+	if (ret < 0) {
+		LOG_ERR("Failed to scan DECT beacons: %d", ret);
+	}
+
+	struct dect_rssi_scan_params rssi_params = {
+    	.frame_count_to_scan = 10,
+    	.channel_count = 0,
+    	.band = 1,
+	};
+
+	ret = net_mgmt(NET_REQUEST_DECT_RSSI_SCAN, dect_iface,
+               &rssi_params, sizeof(rssi_params));
+	if (ret < 0) {
+		LOG_ERR("Failed to scan DECT RSSI: %d", ret);
+	}
+}
+
+static void dect_get_neighbours(void) {
+	int ret;
+
+	ret = net_mgmt(NET_REQUEST_DECT_NEIGHBOR_INFO, dect_iface, NULL, 0);
+	if (ret < 0) {
+		LOG_ERR("Failed to get DECT neighbors: %d", ret);
+	}
+}
+
+static void dect_event_handler(struct net_mgmt_event_callback *cb,
+                               uint64_t event, struct net_if *iface)
+{
+    switch (event) {
+    case NET_EVENT_DECT_SCAN_RESULT:
+        struct dect_scan_result_evt *result = cb->info;
+
+        LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
+                result->transmitter_long_rd_id,
+                result->channel);  // Just log the first subslot verdict for simplicity
+        break;
+
+    case NET_EVENT_DECT_RSSI_SCAN_RESULT:
+        struct dect_rssi_scan_result_evt *rssi_result = cb->info;
+		struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
+		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
+				data->channel,
+				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
+        break;
+
+    case NET_EVENT_DECT_SCAN_DONE:
+        LOG_INF("Scan complete");
+        break;
+
+    default:
+        LOG_WRN("Unhandled DECT event: 0x%llx", event);
+        break;
+    }
+}
+
 int main(void)
 {
 	int err;
@@ -449,6 +519,12 @@ int main(void)
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
+	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
+    NET_EVENT_DECT_SCAN_RESULT      |
+    NET_EVENT_DECT_RSSI_SCAN_RESULT |
+    NET_EVENT_DECT_SCAN_DONE);
+
+	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
 				     net_if_event_handler,
@@ -499,11 +575,13 @@ int main(void)
 	}
 #endif
 	LOG_INF("Hello DECT application started successfully");
+	
 #if defined(CONFIG_DK_LIBRARY)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
-
+	
 	/* Main application loop - run UDP receive in main thread */
+
 	hello_dect_mac_rx_thread();
 
 	return 0;
