@@ -298,6 +298,8 @@ static void hello_dect_mac_rx_thread(void)
 			continue;
 		}
 
+		dect_get_neighbours();
+
 		addr_len = sizeof(src_addr);
 		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
 			       (struct sockaddr *)&src_addr, &addr_len);
@@ -324,7 +326,6 @@ static void hello_dect_mac_rx_thread(void)
 			LOG_INF("Received %d bytes from %s: %s",
 				ret, addr_str, buffer);
 		}
-
 
 	}
 }
@@ -446,13 +447,15 @@ static void dect_scan_beacons(void)
 	}
 }
 
-static void dect_get_neighbours(void) {
+void dect_get_neighbours(void) {
 	int ret;
+	LOG_INF("Getting DECT neighbors...");
 
-	ret = net_mgmt(NET_REQUEST_DECT_NEIGHBOR_INFO, dect_iface, NULL, 0);
+	ret = net_mgmt(NET_REQUEST_DECT_NEIGHBOR_LIST, dect_iface, NULL, 0);
 	if (ret < 0) {
 		LOG_ERR("Failed to get DECT neighbors: %d", ret);
 	}
+
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
@@ -478,6 +481,18 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_DECT_SCAN_DONE:
         LOG_INF("Scan complete");
         break;
+
+	case NET_EVENT_DECT_NEIGHBOR_LIST:
+		struct dect_neighbor_list_evt *neighbor_list = cb->info;
+		LOG_INF("Neighbor list received: %d neighbors found", neighbor_list->neighbor_count);
+    
+		for (int i = 0; i < neighbor_list->neighbor_count; i++) {
+			LOG_INF("  Neighbor %d: long_rd_id=0x%08x (%u)",
+					i,
+					neighbor_list->neighbor_long_rd_ids[i],
+					neighbor_list->neighbor_long_rd_ids[i]);
+		}
+		break;
 
     default:
         LOG_WRN("Unhandled DECT event: 0x%llx", event);
@@ -522,7 +537,8 @@ int main(void)
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
     NET_EVENT_DECT_SCAN_RESULT      |
     NET_EVENT_DECT_RSSI_SCAN_RESULT |
-    NET_EVENT_DECT_SCAN_DONE);
+    NET_EVENT_DECT_SCAN_DONE		|
+	NET_EVENT_DECT_NEIGHBOR_LIST);
 
 	net_mgmt_add_event_callback(&dect_event_cb);
 
@@ -584,5 +600,6 @@ int main(void)
 
 	hello_dect_mac_rx_thread();
 
+	
 	return 0;
 }
