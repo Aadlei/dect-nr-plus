@@ -51,7 +51,7 @@ static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
 static struct net_mgmt_event_callback dect_event_cb;
 static void check_spi_image_work_handler(struct k_work *work);
- K_WORK_DELAYABLE_DEFINE(check_spi_image_work, check_spi_image_work_handler);
+
 /* Application state */
 static bool dect_connected;
 static uint32_t message_counter;
@@ -77,37 +77,21 @@ static char *peer_hostname = "dect-nr+-ft-device.local";
 #endif
 
 /* Forward declarations */
-static void hello_dect_max_tx_work_handler(struct k_work *work);
-static void hello_dect_mac_tx_demo_message(void);
 static void hello_dect_mac_resolve_peer_address(void);
 static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
 static void dect_get_neighbors(void);
 static void dect_get_settings(void);
+static void hello_dect_mac_tx_demo_message(void);
 
-/* Demo work definition */
-static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
+/* TX work declaration */
+static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
 static void hello_dect_led2_off_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
 #endif
-
-static void hello_dect_max_tx_work_handler(struct k_work *work)
-{
-	if (dect_connected) {
-		/* Try to resolve peer if not already resolved */
-		if (!peer_resolved) {
-			hello_dect_mac_resolve_peer_address();
-		}
-		hello_dect_mac_tx_demo_message();
-
-		/* Reschedule work */
-		k_work_schedule(&tx_work,
-				K_SECONDS(CONFIG_HELLO_DECT_MAC_DEMO_INTERVAL));
-	}
-}
 
 #if defined(CONFIG_DK_LIBRARY)
 static void hello_dect_led2_off_work_handler(struct k_work *work)
@@ -119,24 +103,16 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 
 static void check_spi_image_work_handler(struct k_work *work)
 {
-    if (spi_slave_is_new_image_available()) {
-		const uint8_t *image_data = spi_slave_get_image_buffer();
-        size_t image_size = spi_slave_get_image_size();
-        
-        LOG_INF("New image received: %zu bytes", image_size);
-        
-        // Send to laptop via uart
-        int ret = uart_send_image(image_data, image_size);
-        if (ret != 0) {
-            LOG_ERR("Failed to send image via uart: %d", ret);
-        } else {
-            LOG_INF("Image forwarded to uart");
-        }
-        
-        spi_slave_clear_image_flag();
-    }
+	if (!dect_connected)
+		return;
 
-    k_work_schedule(&check_spi_image_work, K_SECONDS(1));
+	if (!peer_resolved)
+		hello_dect_mac_resolve_peer_address();
+
+	hello_dect_mac_tx_demo_message();
+	
+	// Reschedule work
+	k_work_schedule(&tx_work, K_SECONDS(10));
 }
 
 static void hello_dect_mac_resolve_peer_address(void)
@@ -170,12 +146,14 @@ static void hello_dect_mac_resolve_peer_address(void)
 static void hello_dect_mac_tx_demo_message(void)
 {
 	int sock, ret;
-	char message[512];
 	char addr_str[NET_IPV6_ADDR_LEN];
 
-	snprintf(message, sizeof(message),
-		"Hello DECT NR+ from %s (name: %s) device! Message #%u",
-		DEVICE_TYPE_STR, local_hostname, ++message_counter);
+	// Stop transmission if no new image is available
+	if (!spi_slave_is_new_image_available())
+	{
+		LOG_WRN("No new image available. Not sending.");
+		return;
+	}
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (sock < 0) {
@@ -183,14 +161,20 @@ static void hello_dect_mac_tx_demo_message(void)
 		return;
 	}
 
-	if (peer_resolved) {
+	const uint8_t *image_data = spi_slave_get_image_buffer();
+	size_t image_size = spi_slave_get_image_size();
+
+	if (peer_resolved)
+	{
 		/* Send to discovered peer */
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		ret = sendto(sock, message, strlen(message), 0,
+		ret = sendto(sock, image_data, image_size, 0,
 			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
-	} else {
+	}
+	else
+	{
 		/* Fallback to multicast */
 		struct sockaddr_in6 mcast_addr = {0};
 
@@ -202,14 +186,15 @@ static void hello_dect_mac_tx_demo_message(void)
 
 		LOG_INF("Sending to multicast (peer not resolved)");
 
-		ret = sendto(sock, message, strlen(message), 0,
+		ret = sendto(sock, image_data, image_size, 0,
 			     (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
 	}
 
-	if (ret < 0) {
-		LOG_ERR("Failed to send message: %d", errno);
-	} else {
-		LOG_INF("Sent: %s", message);
+	if (ret != 0)
+		LOG_ERR("Failed to send image to peer: %d", ret);
+	else
+		LOG_INF("Image sent to peer!");
+	spi_slave_clear_image_flag();
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Cancel any pending LED 2 turn-off work */
@@ -219,7 +204,6 @@ static void hello_dect_mac_tx_demo_message(void)
 		/* Schedule LED 2 to turn off after 1 second */
 		k_work_schedule(&led2_off_work, K_SECONDS(1));
 #endif
-	}
 
 	close(sock);
 }
@@ -549,8 +533,6 @@ int main(void)
 
 	/* Set hostname based on device type */
 	hello_dect_mac_set_hostname();
-
-	k_work_schedule(&check_spi_image_work, K_SECONDS(5));
 
 	/* Setup network management callbacks for L4 connected/disconnected events */
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
