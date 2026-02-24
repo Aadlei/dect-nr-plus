@@ -58,6 +58,7 @@ static uint32_t message_counter;
 static struct sockaddr_in6 peer_addr;
 static bool peer_resolved;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
+static struct dect_settings dev_settings;
 
 /* Socket receive timeout in seconds */
 #define SOCKET_RECV_TIMEOUT_SEC 5
@@ -81,6 +82,8 @@ static void hello_dect_mac_tx_demo_message(void);
 static void hello_dect_mac_resolve_peer_address(void);
 static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
+static void dect_get_neighbors(void);
+static void dect_get_settings(void);
 
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
@@ -298,7 +301,8 @@ static void hello_dect_mac_rx_thread(void)
 			continue;
 		}
 
-		dect_get_neighbours();
+		//dect_get_neighbors();
+		dect_get_settings();
 
 		addr_len = sizeof(src_addr);
 		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
@@ -447,7 +451,7 @@ static void dect_scan_beacons(void)
 	}
 }
 
-void dect_get_neighbours(void) {
+static void dect_get_neighbors(void) {
 	int ret;
 	LOG_INF("Getting DECT neighbors...");
 
@@ -455,7 +459,24 @@ void dect_get_neighbours(void) {
 	if (ret < 0) {
 		LOG_ERR("Failed to get DECT neighbors: %d", ret);
 	}
+}
 
+static void dect_get_settings(void)
+{
+	int ret;
+	LOG_INF("Reading DECT settings...");
+
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret < 0)
+		LOG_ERR("Failed to read DECT settings: %d", ret);
+
+	// Print identities
+	LOG_INF("Current device identities:");
+	struct dect_settings_identities *dev_ids = &dev_settings.identities;
+
+	LOG_INF("  Long RD ID: 0x%08x (%u)",
+		 dev_ids->transmitter_long_rd_id, dev_ids->transmitter_long_rd_id
+		);
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
@@ -463,16 +484,17 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 {
     switch (event) {
     case NET_EVENT_DECT_SCAN_RESULT:
-        struct dect_scan_result_evt *result = cb->info;
+        const struct dect_scan_result_evt *result = cb->info;
 
         LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
                 result->transmitter_long_rd_id,
-                result->channel);  // Just log the first subslot verdict for simplicity
+                result->channel,
+				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
         break;
 
     case NET_EVENT_DECT_RSSI_SCAN_RESULT:
-        struct dect_rssi_scan_result_evt *rssi_result = cb->info;
-		struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
+        const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
+		const struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
 		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
 				data->channel,
 				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
@@ -483,7 +505,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
         break;
 
 	case NET_EVENT_DECT_NEIGHBOR_LIST:
-		struct dect_neighbor_list_evt *neighbor_list = cb->info;
+		const struct dect_neighbor_list_evt *neighbor_list = cb->info;
 		LOG_INF("Neighbor list received: %d neighbors found", neighbor_list->neighbor_count);
     
 		for (int i = 0; i < neighbor_list->neighbor_count; i++) {
@@ -533,12 +555,15 @@ int main(void)
 	/* Setup network management callbacks for L4 connected/disconnected events */
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
+
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
+
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    NET_EVENT_DECT_SCAN_RESULT      |
-    NET_EVENT_DECT_RSSI_SCAN_RESULT |
-    NET_EVENT_DECT_SCAN_DONE		|
-	NET_EVENT_DECT_NEIGHBOR_LIST);
+    	NET_EVENT_DECT_SCAN_RESULT      |
+    	NET_EVENT_DECT_RSSI_SCAN_RESULT |
+    	NET_EVENT_DECT_SCAN_DONE		|
+		NET_EVENT_DECT_NEIGHBOR_LIST
+	);
 
 	net_mgmt_add_event_callback(&dect_event_cb);
 
