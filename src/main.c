@@ -84,7 +84,7 @@ static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
 static void dect_get_neighbors(void);
 static void dect_get_settings(void);
-static void hello_dect_mac_tx_demo_message(void);
+static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size);
 
 /* TX work declaration */
 static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
@@ -102,51 +102,6 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 	dk_set_led_off(DK_LED2);
 }
 #endif
-
-static void check_spi_image_work_handler(struct k_work *work)
-{
-    if (spi_slave_is_new_image_available()) {
-		const uint8_t *image_data = spi_slave_get_image_buffer();
-        size_t image_size = spi_slave_get_image_size();
-        
-        LOG_INF("New image received: %zu bytes", image_size);
-
-
-		//TODO: Change to FT in future.
-		// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-		if(strcmp(DEVICE_TYPE_STR, "PT") == 0) {
-			struct image_metadata meta = {
-				.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
-				.hop_count = 0,
-				.seq_num = 0
-			};
-
-
-			int ret = uart_send_image(image_data, image_size, &meta);
-			if (ret != 0) {
-				LOG_ERR("Failed to send image via uart: %d", ret);
-			} else {
-				LOG_INF("Image forwarded to uart");
-			}
-		}
-        
-        
-        
-        spi_slave_clear_image_flag();
-    }
-
-    k_work_schedule(&check_spi_image_work, K_SECONDS(1));
-	if (!dect_connected)
-		return;
-
-	if (!peer_resolved)
-		hello_dect_mac_resolve_peer_address();
-
-	hello_dect_mac_tx_demo_message();
-	
-	// Reschedule work
-	k_work_schedule(&tx_work, K_SECONDS(10));
-}
 
 static void hello_dect_mac_resolve_peer_address(void)
 {
@@ -176,26 +131,62 @@ static void hello_dect_mac_resolve_peer_address(void)
 	}
 }
 
-static void hello_dect_mac_tx_demo_message(void)
+static void check_spi_image_work_handler(struct k_work *work)
+{
+	// No tx if no new image is available
+    if (!spi_slave_is_new_image_available())
+	{
+		LOG_WRN("No new image available. Aborting transmission.");
+		k_work_schedule(&tx_work, K_SECONDS(10));
+		return;
+	}
+
+	const uint8_t *image_data = spi_slave_get_image_buffer();
+	size_t image_size = spi_slave_get_image_size();
+	
+	LOG_INF("New image received: %zu bytes", image_size);
+
+	//TODO: Change to FT in future.
+	// Basically if the PI is connected to the gateway directly, just transmit it over uart.
+	if (strcmp(DEVICE_TYPE_STR, "PT") == 0)
+	{
+		struct image_metadata meta = {
+			.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
+			.hop_count = 0,
+			.seq_num = 0
+		};
+
+		int ret = uart_send_image(image_data, image_size, &meta);
+		if (ret != 0) {
+			LOG_ERR("Failed to send image via uart: %d", ret);
+		} else {
+			LOG_INF("Image forwarded to uart");
+		}
+	}
+	else if (dect_connected)
+	{
+		if (!peer_resolved)	
+			hello_dect_mac_resolve_peer_address();
+
+		hello_dect_mac_tx_demo_message(image_data, image_size);
+	}
+        
+	spi_slave_clear_image_flag();
+
+	// Reschedule work
+	k_work_schedule(&tx_work, K_SECONDS(10));
+}
+
+static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size)
 {
 	int sock, ret;
 	char addr_str[NET_IPV6_ADDR_LEN];
-
-	// Stop transmission if no new image is available
-	if (!spi_slave_is_new_image_available())
-	{
-		LOG_WRN("No new image available. Not sending.");
-		return;
-	}
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (sock < 0) {
 		LOG_ERR("Failed to create socket: %d", errno);
 		return;
 	}
-
-	const uint8_t *image_data = spi_slave_get_image_buffer();
-	size_t image_size = spi_slave_get_image_size();
 
 	if (peer_resolved)
 	{
