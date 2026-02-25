@@ -103,6 +103,16 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 }
 #endif
 
+/* Image chunk definition */
+#define CHUNK_PAYLOAD_SIZE 1000
+struct image_chunk 
+{
+	uint16_t chunk_idx;
+	uint16_t total_chunks;
+	uint16_t payload_len;
+	uint8_t payload[];
+};
+
 static void hello_dect_mac_resolve_peer_address(void)
 {
 	int ret;
@@ -194,8 +204,37 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		ret = sendto(sock, image_data, image_size, 0,
+		uint16_t total_chunks = (image_size + CHUNK_PAYLOAD_SIZE - 1) / CHUNK_PAYLOAD_SIZE;
+
+		for (uint16_t i=0; i < total_chunks; i++)
+		{
+			size_t offset = i * CHUNK_PAYLOAD_SIZE;
+			size_t payload_len = MIN(CHUNK_PAYLOAD_SIZE, image_size - offset);
+			size_t total_size = sizeof(struct image_chunk) + payload_len;
+
+			struct image_chunk *packet = malloc(total_size);
+			if (packet == NULL)
+			{
+				LOG_ERR("Memory allocation failed!");
+				return;
+			}
+
+			packet->chunk_idx = i;
+			packet->total_chunks = total_chunks;
+			packet->payload_len = payload_len;
+
+			memcpy(packet->payload, image_data + offset, packet->payload_len);
+
+			LOG_INF("Sending chunk %d/%d (%d bytes)", i, total_chunks, payload_len);
+			ret = sendto(sock, packet, total_size, 0,
 			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
+				
+			if (ret < 0)
+				LOG_ERR("Failed to send image chunk to peer: %d", ret);
+
+			// Free the malloc
+			free(packet);
+		}
 	}
 	else
 	{
@@ -218,7 +257,6 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 		LOG_ERR("Failed to send image to peer: %d", ret);
 	else
 		LOG_INF("Image sent to peer!");
-	spi_slave_clear_image_flag();
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Cancel any pending LED 2 turn-off work */
