@@ -59,7 +59,8 @@ bool uart_is_ready(void)
     return uart_ready;
 }
 
-int uart_send_image(const uint8_t *data, uint32_t length)
+// Send frame format: [MAGIC: 4B] [TX_ID: 2B] [HOP_COUNT: 1B] [SEQ: 4B] [LENGTH: 4B] [DATA: N bytes] [CRC16: 2B]
+int uart_send_image(const uint8_t *data, uint32_t length, const struct image_metadata *meta)
 {
     if (!uart_ready) {
         LOG_ERR("UART not initialized");
@@ -71,7 +72,8 @@ int uart_send_image(const uint8_t *data, uint32_t length)
         return -EINVAL;
     }
 
-    LOG_INF("Sending %u bytes via UART0", length);
+    LOG_INF("Sending %u bytes via UART0 (tx_id=%u, hops=%u, seq=%u)",
+            length, meta->tx_id, meta->hop_count, meta->seq_num);
 
     /* Flush any pending log output, then pause logging so it
      * cannot interleave with our binary frame on the same UART. */
@@ -84,6 +86,15 @@ int uart_send_image(const uint8_t *data, uint32_t length)
     uart_poll_out(uart_dev, IMAGE_FRAME_MAGIC_2);
     uart_poll_out(uart_dev, IMAGE_FRAME_MAGIC_3);
 
+    /* Send metadata (7 bytes) */
+    uart_poll_out(uart_dev, (meta->tx_id >> 0) & 0xFF);
+    uart_poll_out(uart_dev, (meta->tx_id >> 8) & 0xFF);
+    uart_poll_out(uart_dev, meta->hop_count);
+    uart_poll_out(uart_dev, (meta->seq_num >> 0) & 0xFF);
+    uart_poll_out(uart_dev, (meta->seq_num >> 8) & 0xFF);
+    uart_poll_out(uart_dev, (meta->seq_num >> 16) & 0xFF);
+    uart_poll_out(uart_dev, (meta->seq_num >> 24) & 0xFF);
+
     /* Send length (4 bytes, little-endian) */
     uart_poll_out(uart_dev, (length >> 0) & 0xFF);
     uart_poll_out(uart_dev, (length >> 8) & 0xFF);
@@ -95,8 +106,22 @@ int uart_send_image(const uint8_t *data, uint32_t length)
         uart_poll_out(uart_dev, data[i]);
     }
 
-    /* Send CRC16 */
-    uint16_t crc = crc16(data, length);
+    /* CRC16 over metadata + image data */
+    uint8_t meta_bytes[] = {
+        (meta->tx_id >> 0) & 0xFF, (meta->tx_id >> 8) & 0xFF,
+        meta->hop_count,
+        (meta->seq_num >> 0) & 0xFF, (meta->seq_num >> 8) & 0xFF,
+        (meta->seq_num >> 16) & 0xFF, (meta->seq_num >> 24) & 0xFF,
+    };
+    uint16_t crc = crc16(meta_bytes, sizeof(meta_bytes));
+    /* Continue CRC over image data */
+    for (uint32_t i = 0; i < length; i++) {
+        crc ^= (uint16_t)data[i];
+        for (int j = 0; j < 8; j++) {
+            crc = (crc & 1) ? (crc >> 1) ^ 0xA001 : crc >> 1;
+        }
+    }
+
     uart_poll_out(uart_dev, (crc >> 0) & 0xFF);
     uart_poll_out(uart_dev, (crc >> 8) & 0xFF);
 
