@@ -14,8 +14,16 @@ config HELLO_DECT_MAC_DEMO_INTERVAL
 	help
 	  Interval in seconds for sending demo messages when connected.
 
+config DECT_TRANSMITTER_ID
+	int "DECT NR+ Transmitter ID"
+	default 38
+	help
+	  DECT NR+ Transmitter ID (long rd id). Range 0..65535
+
 module = HELLO_DECT_MAC
 module-str = Log level for Hello DECT sample application
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"
+
+
 
 endmenu
