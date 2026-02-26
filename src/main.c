@@ -148,7 +148,7 @@ static void check_spi_image_work_handler(struct k_work *work)
         spi_slave_clear_image_flag();
     }
 
-    k_work_schedule(&check_spi_image_work, K_SECONDS(1));
+    k_work_schedule(&check_spi_image_work, K_MSEC(100));
 }
 
 static void hello_dect_mac_resolve_peer_address(void)
