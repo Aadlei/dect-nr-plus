@@ -107,6 +107,7 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 #define WINDOW_SIZE 4
 #define CHUNK_PAYLOAD_SIZE 1000
 #define MAX_CHUNKS 128
+#define TIMEOUT_MS 1000
 
 enum packet_type
 {
@@ -282,9 +283,7 @@ static void receive_chunk(struct tx_entry *tx_table)
 			tx_table[ack_packet.seq].acked = true;
 			LOG_INF("ACK received: %d", ack_packet.seq);
 		}	
-	}
-
-	
+	}	
 }
 
 static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size)
@@ -322,8 +321,11 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 			next_seq++;
 		}
 
-			receive_chunk();
+			receive_chunk(&tx_table); // TODO: Bare flytt alt inn i denne funksjonen så slipper vi pointers og alt sånn
+
+			handle_timeouts();
 		
+			// Slide window
 	}
 	else // TODO: Add multicast if no peer found
 		ret = -1;
