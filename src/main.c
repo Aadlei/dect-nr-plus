@@ -103,14 +103,31 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 }
 #endif
 
-/* Image chunk definition */
+/* Application level protocol */
+#define WINDOW_SIZE 4
 #define CHUNK_PAYLOAD_SIZE 1000
-struct image_chunk 
+#define MAX_CHUNKS 128
+
+enum packet_type
 {
-	uint16_t chunk_idx;
+	DATA,
+	ACK
+};
+
+struct tx_packet
+{
+	uint16_t seq;
 	uint16_t total_chunks;
+	enum packet_type type; // DATA=0, ACK=1
 	uint16_t payload_len;
-	uint8_t payload[];
+	uint8_t payload[CHUNK_PAYLOAD_SIZE];
+};
+
+struct tx_entry
+{
+	bool sent;
+	bool acked;
+	int64_t timestamp;
 };
 
 static void hello_dect_mac_resolve_peer_address(void)
@@ -187,6 +204,89 @@ static void check_spi_image_work_handler(struct k_work *work)
 	k_work_schedule(&tx_work, K_SECONDS(10));
 }
 
+static void send_chunk(int *socket, uint16_t total_chunks, uint16_t current_chunk, const uint8_t *image_data, size_t image_size)
+{
+	size_t offset = current_chunk * CHUNK_PAYLOAD_SIZE;
+	size_t payload_len = MIN(CHUNK_PAYLOAD_SIZE, image_size - offset);
+	size_t total_size = sizeof(struct tx_packet) + payload_len;
+
+	struct tx_packet *packet = malloc(total_size);
+	if (packet == NULL)
+	{
+		LOG_ERR("Memory allocation failed!");
+		return;
+	}
+
+	packet->seq = current_chunk;
+	packet->total_chunks = total_chunks;
+	packet->type = DATA;
+	packet->payload_len = payload_len;
+
+	memcpy(packet->payload, image_data + offset, packet->payload_len);
+
+	LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, payload_len);
+	int ret = sendto(*socket, packet, total_size, 0,
+		(struct sockaddr *)&peer_addr, sizeof(peer_addr));
+		
+	if (ret < 0)
+		LOG_ERR("Failed to send image chunk to peer: %d", ret);
+
+	// Free the malloc
+	free(packet);
+}
+
+static void receive_chunk(struct tx_entry *tx_table)
+{
+	struct tx_packet ack_packet;
+
+	struct sockaddr_in6 src_addr;
+	socklen_t addr_len = sizeof(src_addr);
+
+	int ret, sock;
+	char addr_str[NET_IPV6_ADDR_LEN];
+
+	sock = atomic_get(&recv_socket_atomic);
+	if (sock < 0)
+	{
+		LOG_ERR("Cant open socket on ACK receive: %d", sock);
+		return;
+	}
+
+	while (1)
+	{
+		ret = recvfrom(sock, &ack_packet, sizeof(ack_packet), 0,
+					(struct sockaddr *)&src_addr, &addr_len);
+
+		if (ret < 0)
+		{
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+			{
+				/* Timeout - check if socket is still valid and continue */
+				LOG_DBG("Timeout of socket. Check if ");
+				continue;
+			}
+
+			/* Check if socket was closed by another thread */
+			if (atomic_get(&recv_socket_atomic) < 0)
+			{
+				LOG_DBG("Socket closed, waiting for reconnect");
+				continue;
+			}
+
+			LOG_ERR("recvfrom failed: %d", errno);
+			break;
+		}
+
+		if (ack_packet.type == ACK)
+		{
+			tx_table[ack_packet.seq].acked = true;
+			LOG_INF("ACK received: %d", ack_packet.seq);
+		}	
+	}
+
+	
+}
+
 static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size)
 {
 	int sock, ret;
@@ -204,54 +304,29 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
+		struct tx_entry tx_table[MAX_CHUNKS];
 		uint16_t total_chunks = (image_size + CHUNK_PAYLOAD_SIZE - 1) / CHUNK_PAYLOAD_SIZE;
-
-		for (uint16_t i=0; i < total_chunks; i++)
+		uint16_t base = 0;
+		uint16_t next_seq = 0;
+		
+		while (next_seq < base + WINDOW_SIZE && next_seq < total_chunks)
 		{
-			size_t offset = i * CHUNK_PAYLOAD_SIZE;
-			size_t payload_len = MIN(CHUNK_PAYLOAD_SIZE, image_size - offset);
-			size_t total_size = sizeof(struct image_chunk) + payload_len;
+			send_chunk(&sock,
+					total_chunks, base,
+					image_data, image_size
+				);
 
-			struct image_chunk *packet = malloc(total_size);
-			if (packet == NULL)
-			{
-				LOG_ERR("Memory allocation failed!");
-				return;
-			}
+			tx_table[next_seq].sent = true;
+			tx_table[next_seq].timestamp = k_uptime_get();
 
-			packet->chunk_idx = i;
-			packet->total_chunks = total_chunks;
-			packet->payload_len = payload_len;
-
-			memcpy(packet->payload, image_data + offset, packet->payload_len);
-
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i, total_chunks, payload_len);
-			ret = sendto(sock, packet, total_size, 0,
-			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
-				
-			if (ret < 0)
-				LOG_ERR("Failed to send image chunk to peer: %d", ret);
-
-			// Free the malloc
-			free(packet);
+			next_seq++;
 		}
+
+			receive_chunk();
+		
 	}
-	else
-	{
-		/* Fallback to multicast */
-		struct sockaddr_in6 mcast_addr = {0};
-
-		mcast_addr.sin6_family = AF_INET6;
-		mcast_addr.sin6_port = htons(12345);
-
-		/* Well known IPv6 link local scope all nodes multicast address (FF02::1) */
-		net_ipv6_addr_create_ll_allnodes_mcast((struct in6_addr *)&mcast_addr.sin6_addr);
-
-		LOG_INF("Sending to multicast (peer not resolved)");
-
-		ret = sendto(sock, image_data, image_size, 0,
-			     (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
-	}
+	else // TODO: Add multicast if no peer found
+		ret = -1;
 
 	if (ret != 0)
 		LOG_ERR("Failed to send image to peer: %d", ret);
