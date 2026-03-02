@@ -216,7 +216,7 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		uint16_t total_chunks = ceil(image_size / MAX_PAYLOAD_SIZE);
+		uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
 
 		for (uint16_t i=0; i < total_chunks; i++)
 		{
@@ -241,16 +241,19 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 			ret = sendto(sock, packet, total_size, 0,
 			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
 				
-			if (ret < 0)
+			if (ret <= 0)
 				LOG_ERR("Failed to send image chunk to peer: %d", ret);
 
 			// Free the malloc
 			free(packet);
+
+			// Temp sleep between chunks
+			k_msleep(500);
 		}
 	}
 	// TODO: Handle multicast
 
-	if (ret != 0)
+	if (ret <= 0)
 		LOG_ERR("Failed to send image to peer: %d", ret);
 	else
 		LOG_INF("Image sent to peer!");
