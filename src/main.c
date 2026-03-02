@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
+// NOTE TO SELF: If the tx_work is not scheduled and not running, REMEMBER TO CONNECT ANOTHER DEVICE AS RECEIVER
+
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
@@ -31,6 +33,7 @@
 
 #include "spi.h"
 #include "uart.h"
+#include <math.h>
 
 LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -60,7 +63,6 @@ static uint32_t message_counter;
 static struct sockaddr_in6 peer_addr;
 static bool peer_resolved;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
-static struct dect_settings dev_settings;
 
 /* Socket receive timeout in seconds */
 #define SOCKET_RECV_TIMEOUT_SEC 5
@@ -82,9 +84,7 @@ static char *peer_hostname = "dect-nr+-ft-device.local";
 static void hello_dect_mac_resolve_peer_address(void);
 static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
-static void dect_get_neighbors(void);
-static void dect_get_settings(void);
-static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size);
+static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size);
 
 /* TX work declaration */
 static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
@@ -104,13 +104,14 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 #endif
 
 /* Image chunk definition */
-#define CHUNK_PAYLOAD_SIZE 1000
-struct image_chunk 
+#define MAX_PAYLOAD_SIZE 1000
+struct data_packet 
 {
-	uint16_t chunk_idx;
-	uint16_t total_chunks;
+	uint16_t packet_idx;
+	uint16_t total_packets;
 	uint16_t payload_len;
-	uint8_t payload[];
+	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
+	uint8_t payload[]; // Either allocate full payload size or dynamic. Found out what is best.
 };
 
 static void hello_dect_mac_resolve_peer_address(void)
@@ -143,6 +144,14 @@ static void hello_dect_mac_resolve_peer_address(void)
 
 static void check_spi_image_work_handler(struct k_work *work)
 {
+	// First check if dect is connected so device can transmit
+	if (!dect_connected)
+	{
+		LOG_ERR("DECT not connected! Rescheduling in 10 seconds...");
+		k_work_schedule(&tx_work, K_SECONDS(10));
+		return;
+	}
+
 	// No tx if no new image is available
     if (!spi_slave_is_new_image_available())
 	{
@@ -178,7 +187,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 		if (!peer_resolved)	
 			hello_dect_mac_resolve_peer_address();
 
-		hello_dect_mac_tx_demo_message(image_data, image_size);
+		LOG_INF("Proceeding to tx of image.");
+		hello_dect_tx_image_message(image_data, image_size);
 	}
         
 	spi_slave_clear_image_flag();
@@ -187,13 +197,15 @@ static void check_spi_image_work_handler(struct k_work *work)
 	k_work_schedule(&tx_work, K_SECONDS(10));
 }
 
-static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t image_size)
+static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size)
 {
-	int sock, ret;
+	int sock;
+	int ret = -1;
 	char addr_str[NET_IPV6_ADDR_LEN];
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0) {
+	if (sock < 0)
+	{
 		LOG_ERR("Failed to create socket: %d", errno);
 		return;
 	}
@@ -204,28 +216,28 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		uint16_t total_chunks = (image_size + CHUNK_PAYLOAD_SIZE - 1) / CHUNK_PAYLOAD_SIZE;
+		uint16_t total_chunks = ceil(image_size / MAX_PAYLOAD_SIZE);
 
 		for (uint16_t i=0; i < total_chunks; i++)
 		{
-			size_t offset = i * CHUNK_PAYLOAD_SIZE;
-			size_t payload_len = MIN(CHUNK_PAYLOAD_SIZE, image_size - offset);
-			size_t total_size = sizeof(struct image_chunk) + payload_len;
+			size_t offset = i * MAX_PAYLOAD_SIZE;
+			size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+			size_t total_size = sizeof(struct data_packet) + payload_len;
 
-			struct image_chunk *packet = malloc(total_size);
+			struct data_packet *packet = malloc(total_size);
 			if (packet == NULL)
 			{
 				LOG_ERR("Memory allocation failed!");
 				return;
 			}
 
-			packet->chunk_idx = i;
-			packet->total_chunks = total_chunks;
+			packet->packet_idx = i;
+			packet->total_packets = total_chunks;
 			packet->payload_len = payload_len;
 
 			memcpy(packet->payload, image_data + offset, packet->payload_len);
 
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i, total_chunks, payload_len);
+			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, payload_len);
 			ret = sendto(sock, packet, total_size, 0,
 			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
 				
@@ -236,22 +248,7 @@ static void hello_dect_mac_tx_demo_message(const uint8_t *image_data, size_t ima
 			free(packet);
 		}
 	}
-	else
-	{
-		/* Fallback to multicast */
-		struct sockaddr_in6 mcast_addr = {0};
-
-		mcast_addr.sin6_family = AF_INET6;
-		mcast_addr.sin6_port = htons(12345);
-
-		/* Well known IPv6 link local scope all nodes multicast address (FF02::1) */
-		net_ipv6_addr_create_ll_allnodes_mcast((struct in6_addr *)&mcast_addr.sin6_addr);
-
-		LOG_INF("Sending to multicast (peer not resolved)");
-
-		ret = sendto(sock, image_data, image_size, 0,
-			     (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
-	}
+	// TODO: Handle multicast
 
 	if (ret != 0)
 		LOG_ERR("Failed to send image to peer: %d", ret);
@@ -347,9 +344,6 @@ static void hello_dect_mac_rx_thread(void)
 			continue;
 		}
 
-		//dect_get_neighbors();
-		dect_get_settings();
-
 		addr_len = sizeof(src_addr);
 		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
 			       (struct sockaddr *)&src_addr, &addr_len);
@@ -410,7 +404,8 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		hello_dect_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
+		// k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
+		// This is buggy. The shit doesnt start, so moved to manual schedule
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Turn on LED 1 to indicate connection */
@@ -467,62 +462,6 @@ static void hello_dect_mac_set_hostname(void)
 	} else {
 		LOG_INF("Hostname set to: %s", local_hostname);
 	}
-}
-
-static void dect_scan_beacons(void)
-{
-	int ret;
-	LOG_INF("Scanning for DECT beacons...");
-	struct dect_scan_params scan_params =  {
-		.channel_scan_time_ms = 500,
-		.channel_count = 0,  			/* Scan all channels */
-		.band = 0  						/* Use default band */
-	};	
-
-	ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params));
-	if (ret < 0) {
-		LOG_ERR("Failed to scan DECT beacons: %d", ret);
-	}
-
-	struct dect_rssi_scan_params rssi_params = {
-    	.frame_count_to_scan = 10,
-    	.channel_count = 0,
-    	.band = 1,
-	};
-
-	ret = net_mgmt(NET_REQUEST_DECT_RSSI_SCAN, dect_iface,
-               &rssi_params, sizeof(rssi_params));
-	if (ret < 0) {
-		LOG_ERR("Failed to scan DECT RSSI: %d", ret);
-	}
-}
-
-static void dect_get_neighbors(void) {
-	int ret;
-	LOG_INF("Getting DECT neighbors...");
-
-	ret = net_mgmt(NET_REQUEST_DECT_NEIGHBOR_LIST, dect_iface, NULL, 0);
-	if (ret < 0) {
-		LOG_ERR("Failed to get DECT neighbors: %d", ret);
-	}
-}
-
-static void dect_get_settings(void)
-{
-	int ret;
-	LOG_INF("Reading DECT settings...");
-
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret < 0)
-		LOG_ERR("Failed to read DECT settings: %d", ret);
-
-	// Print identities
-	LOG_INF("Current device identities:");
-	struct dect_settings_identities *dev_ids = &dev_settings.identities;
-
-	LOG_INF("  Long RD ID: 0x%08x (%u)",
-		 dev_ids->transmitter_long_rd_id, dev_ids->transmitter_long_rd_id
-		);
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
@@ -665,10 +604,10 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 	
-	/* Main application loop - run UDP receive in main thread */
-
+	/* Main application loop - schedule tx work and run UDP receive in main thread */
+	k_work_schedule(&tx_work, K_SECONDS(5));
+	
 	hello_dect_mac_rx_thread();
-
 	
 	return 0;
 }
