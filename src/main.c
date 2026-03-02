@@ -104,14 +104,14 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 #endif
 
 /* Image chunk definition */
-#define MAX_PAYLOAD_SIZE 1000
+#define MAX_PAYLOAD_SIZE 1024
 struct data_packet 
 {
 	uint16_t packet_idx;
 	uint16_t total_packets;
 	uint16_t payload_len;
 	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
-	uint8_t payload[]; // Either allocate full payload size or dynamic. Found out what is best.
+	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
 };
 
 static void hello_dect_mac_resolve_peer_address(void)
@@ -187,7 +187,6 @@ static void check_spi_image_work_handler(struct k_work *work)
 		if (!peer_resolved)	
 			hello_dect_mac_resolve_peer_address();
 
-		LOG_INF("Proceeding to tx of image.");
 		hello_dect_tx_image_message(image_data, image_size);
 	}
         
@@ -237,18 +236,34 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 
 			memcpy(packet->payload, image_data + offset, packet->payload_len);
 
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, payload_len);
-			ret = sendto(sock, packet, total_size, 0,
+			uint8_t retry_count = 0;
+			while (retry_count < 5)
+			{
+				ret = sendto(sock, packet, total_size, 0,
 			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
-				
-			if (ret <= 0)
-				LOG_ERR("Failed to send image chunk to peer: %d", ret);
+
+				if (ret >= 0) // Success
+				{
+					LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, payload_len);
+					break;
+				}
+				else if (ret == -ENOMEM || ret == -ENOBUFS) // Buffer full
+				{
+					retry_count++;
+					k_msleep((retry_count + 1) * 200);
+					continue;
+				}
+				else
+				{
+					LOG_ERR("Failed to send image chunk to peer: %d", ret);
+					break;
+				}
+			}
 
 			// Free the malloc
 			free(packet);
 
 			// Temp sleep between chunks
-			k_msleep(500);
 		}
 	}
 	// TODO: Handle multicast
