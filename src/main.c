@@ -244,7 +244,7 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 
 				if (ret >= 0) // Success
 				{
-					LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, payload_len);
+					LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
 					break;
 				}
 				else if (ret == -ENOMEM || ret == -ENOBUFS) // Buffer full
