@@ -4,14 +4,40 @@
 #include <zephyr/kernel.h>
 #include <stdint.h>
 
+#define MAX_PAYLOAD_SIZE 1024
+#define CHUNK_BUF_SIZE   (12 + MAX_PAYLOAD_SIZE)  /* data_packet header + payload */
+#define CHUNK_POOL_COUNT 4
+
+struct rx_chunk {
+    void *fifo_reserved;
+    uint16_t data_len;
+    uint8_t  data[CHUNK_BUF_SIZE];
+};
+
 struct image_metadata {
     uint16_t tx_id;
     uint8_t hop_count;
     uint32_t seq_num;
 };
 
+struct data_packet 
+{
+    uint16_t packet_idx;
+    uint16_t total_packets;
+    size_t total_data_size;
+    uint16_t payload_len;
+    uint8_t payload[];
+} __attribute__((packed));
+
 int uart_data_init(void);
 int uart_send_image(const uint8_t *data, uint32_t length, const struct image_metadata *meta);
+int uart_stream_begin(uint32_t total_length, const struct image_metadata *meta);
+int uart_stream_chunk(const uint8_t *data, uint16_t len);
+int uart_stream_end(void);
+int uart_tx_thread_start(void);
+struct rx_chunk *uart_get_free_chunk(void);
+void uart_return_free_chunk(struct rx_chunk *chunk);
+void uart_queue_chunk(struct rx_chunk *chunk);
 bool uart_is_ready(void);
 
 #endif /* UART_DATA_H */

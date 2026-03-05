@@ -59,7 +59,7 @@ static void check_spi_image_work_handler(struct k_work *work);
 
 /* Application state */
 static bool dect_connected;
-static uint32_t message_counter;
+uint32_t message_counter;
 static struct sockaddr_in6 peer_addr;
 static bool peer_resolved;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
@@ -105,14 +105,6 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 
 /* Image chunk definition */
 #define MAX_PAYLOAD_SIZE 1024
-struct data_packet 
-{
-	uint16_t packet_idx;
-	uint16_t total_packets;
-	uint16_t payload_len;
-	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
-	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
-};
 
 static void hello_dect_mac_resolve_peer_address(void)
 {
@@ -167,7 +159,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 
 	//TODO: Change to FT in future.
 	// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-	if (strcmp(DEVICE_TYPE_STR, "PT") == 0)
+	if (strcmp(DEVICE_TYPE_STR, "FT") == 0)
 	{
 		struct image_metadata meta = {
 			.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
@@ -249,7 +241,6 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 		}
 	}
 	// TODO: Handle multicast
-
 	if (ret <= 0)
 		LOG_ERR("Failed to send image to peer: %d", ret);
 	else
@@ -330,50 +321,51 @@ static void hello_dect_mac_stop_udp_listener(void)
 
 static void hello_dect_mac_rx_thread(void)
 {
-	char buffer[1024];
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len;
-	int ret;
-	int sock;
-	char addr_str[NET_IPV6_ADDR_LEN];
+    struct sockaddr_in6 src_addr;
+    socklen_t addr_len;
+    int ret;
+    int sock;
 
-	while (1) {
-		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0) {
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
+    while (1) {
+        sock = atomic_get(&recv_socket_atomic);
+        if (sock < 0) {
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
 
-		addr_len = sizeof(src_addr);
-		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
-			       (struct sockaddr *)&src_addr, &addr_len);
+        struct rx_chunk *chunk = uart_get_free_chunk();
 
-		if (ret < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Timeout - check if socket is still valid and continue */
-				continue;
-			}
-			/* Check if socket was closed by another thread */
-			if (atomic_get(&recv_socket_atomic) < 0) {
-				LOG_DBG("Socket closed, waiting for reconnect");
-				continue;
-			}
-			LOG_ERR("recvfrom failed: %d", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
+        addr_len = sizeof(src_addr);
+        ret = recvfrom(sock, chunk->data, CHUNK_BUF_SIZE, 0,
+                   (struct sockaddr *)&src_addr, &addr_len);
 
-		if (ret > 0) {
-			buffer[ret] = '\0';
-			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
-				      addr_str, sizeof(addr_str));
-			LOG_INF("Received %d bytes from %s: %s",
-				ret, addr_str, buffer);
-		}
+        if (ret < 0) {
+            uart_return_free_chunk(chunk);
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+                continue;
+            }
+            if (atomic_get(&recv_socket_atomic) < 0) {
+                continue;
+            }
+            LOG_ERR("recvfrom failed: %d", errno);
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
 
-	}
+        if (ret < (int)sizeof(struct data_packet)) {
+            LOG_WRN("Packet too small: %d bytes", ret);
+            uart_return_free_chunk(chunk);
+            continue;
+        }
+
+        struct data_packet *pkt = (struct data_packet *)chunk->data;
+        LOG_INF("Chunk %d/%d (%d bytes)",
+            pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
+
+        chunk->data_len = ret;
+        uart_queue_chunk(chunk);
+    }
 }
-
 static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
 				       uint64_t mgmt_event, struct net_if *iface)
 {
@@ -604,9 +596,8 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 	
-	/* Main application loop - schedule tx work and run UDP receive in main thread */
+	uart_tx_thread_start(); 
 	k_work_schedule(&tx_work, K_SECONDS(5));
-	
 	hello_dect_mac_rx_thread();
 	
 	return 0;
