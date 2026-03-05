@@ -7,7 +7,7 @@
 LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 
 /*
- * Image data transfer over UART0 (VCOM0) at 1 Mbaud.
+ * Image data transfer over uart1 (VCOM0) at 1 Mbaud.
  * During image transfer, logging is temporarily paused to prevent
  * log output from interleaving with binary image data.
  *
@@ -40,17 +40,17 @@ static uint16_t crc16(const uint8_t *data, uint32_t len)
 
 int uart_data_init(void)
 {
-    LOG_INF("Initializing UART0 for image data (VCOM0 at 1 Mbaud)...");
+    LOG_INF("Initializing uart1 for image data");
 
-    uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart0));
+    uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
 
     if (!device_is_ready(uart_dev)) {
-        LOG_ERR("UART0 device not ready.");
+        LOG_ERR("uart1 device not ready.");
         return -ENODEV;
     }
 
     uart_ready = true;
-    LOG_INF("UART0 ready for image transfer (%s)", uart_dev->name);
+    LOG_INF("uart1 ready for image transfer (%s)", uart_dev->name);
     return 0;
 }
 
@@ -72,13 +72,9 @@ int uart_send_image(const uint8_t *data, uint32_t length, const struct image_met
         return -EINVAL;
     }
 
-    LOG_INF("Sending %u bytes via UART0 (tx_id=%u, hops=%u, seq=%u)",
+    LOG_INF("Sending %u bytes via uart1 (tx_id=%u, hops=%u, seq=%u)",
             length, meta->tx_id, meta->hop_count, meta->seq_num);
 
-    /* Flush any pending log output, then pause logging so it
-     * cannot interleave with our binary frame on the same UART. */
-    log_panic();
-    k_sleep(K_MSEC(20));
 
     /* Send magic header */
     uart_poll_out(uart_dev, IMAGE_FRAME_MAGIC_0);
@@ -124,9 +120,6 @@ int uart_send_image(const uint8_t *data, uint32_t length, const struct image_met
 
     uart_poll_out(uart_dev, (crc >> 0) & 0xFF);
     uart_poll_out(uart_dev, (crc >> 8) & 0xFF);
-
-    /* Re-initialize logging to resume normal operation */
-    log_init();
 
     LOG_INF("Transfer complete (%u bytes, CRC=0x%04X)", length, crc);
 
