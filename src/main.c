@@ -113,7 +113,9 @@ struct data_packet
 	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
 	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
 };
-if (spi_slave_is_new_image_available()) {
+static void check_spi_image_work_handler(struct k_work *work)
+{
+    if (spi_slave_is_new_image_available()) {
 		const uint8_t *image_data = spi_slave_get_image_buffer();
         size_t image_size = spi_slave_get_image_size();
         
