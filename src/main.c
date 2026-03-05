@@ -113,40 +113,6 @@ struct data_packet
 	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
 	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
 };
-static void check_spi_image_work_handler(struct k_work *work)
-{
-    if (spi_slave_is_new_image_available()) {
-		const uint8_t *image_data = spi_slave_get_image_buffer();
-        size_t image_size = spi_slave_get_image_size();
-        
-        LOG_INF("New image received: %zu bytes", image_size);
-
-
-		//TODO: Change to FT in future.
-		// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-		if(strcmp(DEVICE_TYPE_STR, "PT") == 0) {
-			struct image_metadata meta = {
-				.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
-				.hop_count = 0,
-				.seq_num = 0
-			};
-
-
-			int ret = uart_send_image(image_data, image_size, &meta);
-			if (ret != 0) {
-				LOG_ERR("Failed to send image via uart: %d", ret);
-			} else {
-				LOG_INF("Image forwarded to uart");
-			}
-		}
-        
-        
-        
-        spi_slave_clear_image_flag();
-    }
-
-    k_work_schedule(&check_spi_image_work, K_MSEC(100));
-}
 	
 static void hello_dect_mac_resolve_peer_address(void)
 {
