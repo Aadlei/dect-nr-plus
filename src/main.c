@@ -236,34 +236,22 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 
 			memcpy(packet->payload, image_data + offset, packet->payload_len);
 
-			uint8_t retry_count = 0;
-			while (retry_count < 5)
+			ret = sendto(sock, packet, total_size, 0,
+				(struct sockaddr *)&peer_addr, sizeof(peer_addr));
+
+			if (ret >= 0) // Success
 			{
-				ret = sendto(sock, packet, total_size, 0,
-			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
-
-				if (ret >= 0) // Success
-				{
-					LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-					break;
-				}
-				else if (ret == -ENOMEM || ret == -ENOBUFS) // Buffer full
-				{
-					retry_count++;
-					k_msleep((retry_count + 1) * 200);
-					continue;
-				}
-				else
-				{
-					LOG_ERR("Failed to send image chunk to peer: %d", ret);
-					break;
-				}
+				LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
+				break;
 			}
-
-			// Free the malloc
+			else
+			{
+				LOG_ERR("Failed to send image chunk to peer: %d", ret);
+				break;
+			}
+			
+			// Free the packet memory
 			free(packet);
-
-			// Temp sleep between chunks
 		}
 	}
 	// TODO: Handle multicast
