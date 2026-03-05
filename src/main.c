@@ -336,7 +336,7 @@ static void hello_dect_mac_stop_udp_listener(void)
 
 static void hello_dect_mac_rx_thread(void)
 {
-	char buffer[256];
+	char buffer[1024];
 	struct sockaddr_in6 src_addr;
 	socklen_t addr_len;
 	int ret;
