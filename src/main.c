@@ -107,13 +107,13 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 #define MAX_PAYLOAD_SIZE 1024
 struct data_packet 
 {
-  uint16_t packet_idx;
+	uint16_t packet_idx;
 	uint16_t total_packets;
 	uint16_t payload_len;
 	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
 	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
 };
-	
+
 static void hello_dect_mac_resolve_peer_address(void)
 {
 	int ret;
@@ -240,15 +240,9 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 				(struct sockaddr *)&peer_addr, sizeof(peer_addr));
 
 			if (ret >= 0) // Success
-			{
 				LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-				break;
-			}
 			else
-			{
 				LOG_ERR("Failed to send image chunk to peer: %d", ret);
-				break;
-			}
 			
 			// Free the packet memory
 			free(packet);
