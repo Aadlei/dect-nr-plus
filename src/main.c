@@ -109,6 +109,7 @@ struct data_packet
 {
 	uint16_t packet_idx;
 	uint16_t total_packets;
+	size_t total_data_size;
 	uint16_t payload_len;
 	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
 	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
@@ -215,7 +216,7 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
+		uint16_t total_chunks = (image_size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
 
 		for (uint16_t i=0; i < total_chunks; i++)
 		{
@@ -232,6 +233,7 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 
 			packet->packet_idx = i;
 			packet->total_packets = total_chunks;
+			packet->total_data_size = image_size;
 			packet->payload_len = payload_len;
 
 			memcpy(packet->payload, image_data + offset, packet->payload_len);
