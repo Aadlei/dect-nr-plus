@@ -169,7 +169,6 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
                 {
                     memcpy(image_buffer + total_received, rx_buffer, ret);
                     total_received += ret;
-
                     LOG_INF("Chunk %d bytes (total: %zu/%d)",
                             ret, total_received, MAX_IMAGE_SIZE);
 
