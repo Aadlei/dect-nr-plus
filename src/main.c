@@ -29,8 +29,6 @@
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
 
-#include "spi.h"
-#include "uart.h"
 #include <math.h>
 
 LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
@@ -85,12 +83,6 @@ static uint32_t best_ft_long_rd_id  = 0;
 static uint8_t  best_ft_route_cost  = 0xFF;
 static uint32_t sink_long_rd_id     = 0;
 
-/* ============================================================
- * Work items
- * ============================================================ */
-static void check_spi_image_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
-
 #if defined(CONFIG_DK_LIBRARY)
 static void hello_dect_led2_off_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
@@ -105,8 +97,14 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
  * Forward declarations
  * ============================================================ */
 static void hello_dect_mac_rx_thread(void);
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size);
 static void configure_and_connect(dect_device_type_t role, uint32_t target_ft_id);
+static void hello_dect_max_tx_work_handler(struct k_work *work);
+static void hello_dect_mac_tx_demo_message(void);
+
+/* ============================================================
+ * Work items
+ * ============================================================ */
+static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
 
 /* ============================================================
  * Settings write + connect
@@ -349,7 +347,17 @@ static void dect_misc_event_handler(struct net_mgmt_event_callback *cb,
 /* ============================================================
  * Image TX over UDP
  * ============================================================ */
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size)
+static void hello_dect_max_tx_work_handler(struct k_work *work)
+{
+	if (!dect_connected)
+		return;
+
+	hello_dect_mac_tx_demo_message();
+
+	k_work_schedule(&tx_work, K_SECONDS(10));
+}
+
+static void hello_dect_mac_tx_demo_message(void)
 {
 	int sock;
 	int ret = -1;
@@ -577,24 +585,6 @@ int main(void)
 	int err;
 
 	LOG_INF("=== Hello DECT NR+ Mesh Application ===");
-
-	/* Peripheral init */
-	err = spi_slave_init();
-	if (err) {
-		LOG_ERR("SPI init failed: %d", err);
-	} else {
-		err = spi_slave_start_thread();
-		if (err) {
-			LOG_ERR("SPI thread start failed: %d", err);
-		}
-	}
-
-	err = uart_data_init();
-	if (err) {
-		LOG_ERR("UART init failed: %d", err);
-	} else {
-		LOG_INF("UART ready");
-	}
 
 	/* Network management callbacks */
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
