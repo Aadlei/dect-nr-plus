@@ -48,34 +48,21 @@ static struct net_if *dect_iface;
 /* Network management callback */
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
+static struct net_mgmt_event_callback dect_event_cb;
 
 /* Application state */
+static struct net_in6_addr peer_addr;
+static bool peer_addr_known = false;
 static bool dect_connected;
 static uint32_t message_counter;
-static struct sockaddr_in6 peer_addr;
-static bool peer_resolved;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
 /* Socket receive timeout in seconds */
 #define SOCKET_RECV_TIMEOUT_SEC 5
 
-/* Device configuration based on Kconfig */
-#if defined(CONFIG_DECT_DEFAULT_DEV_TYPE_FT)
-#define DEVICE_TYPE_STR "FT"
-static char *local_hostname = "dect-nr+-ft-device";
-static char *peer_hostname = "dect-nr+-pt-device.local";
-#elif defined(CONFIG_DECT_DEFAULT_DEV_TYPE_PT)
-#define DEVICE_TYPE_STR "PT"
-static char *local_hostname = "dect-nr+-pt-device";
-static char *peer_hostname = "dect-nr+-ft-device.local";
-#else
-#error "Either CONFIG_DECT_DEFAULT_DEV_TYPE_FT or _PT must be defined."
-#endif
-
 /* Forward declarations */
 static void hello_dect_max_tx_work_handler(struct k_work *work);
 static void hello_dect_mac_tx_demo_message(void);
-static void hello_dect_mac_resolve_peer_address(void);
 static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
 
@@ -91,10 +78,6 @@ static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
 static void hello_dect_max_tx_work_handler(struct k_work *work)
 {
 	if (dect_connected) {
-		/* Try to resolve peer if not already resolved */
-		if (!peer_resolved) {
-			hello_dect_mac_resolve_peer_address();
-		}
 		hello_dect_mac_tx_demo_message();
 
 		/* Reschedule work */
@@ -111,32 +94,93 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 }
 #endif
 
-static void hello_dect_mac_resolve_peer_address(void)
+static void dect_event_handler(struct net_mgmt_event_callback *cb,
+                               uint64_t event, struct net_if *iface)
 {
-	int ret;
-	struct addrinfo hints = {0};
-	struct addrinfo *result;
-	char addr_str[NET_IPV6_ADDR_LEN];
+    switch (event) {
+    case NET_EVENT_DECT_SCAN_RESULT:
+        const struct dect_scan_result_evt *result = cb->info;
 
-	hints.ai_family = AF_INET6;
-	hints.ai_flags = AI_ADDRCONFIG;
+        LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
+                result->transmitter_long_rd_id,
+                result->channel,
+				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
+        break;
 
-	LOG_INF("Resolving peer hostname: %s", peer_hostname);
+    case NET_EVENT_DECT_RSSI_SCAN_RESULT:
+        const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
+		const struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
+		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
+				data->channel,
+				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
+        break;
 
-	ret = getaddrinfo(peer_hostname, NULL, &hints, &result);
-	if (ret == 0 && result != NULL) {
-		memcpy(&peer_addr, result->ai_addr, sizeof(peer_addr));
-		peer_addr.sin6_port = htons(12345);
-		peer_resolved = true;
+    case NET_EVENT_DECT_SCAN_DONE:
+        LOG_INF("Scan complete");
+        break;
 
-		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Peer resolved to: %s", addr_str);
+	case NET_EVENT_DECT_NEIGHBOR_LIST:
+		const struct dect_neighbor_list_evt *neighbor_list = cb->info;
+		LOG_INF("Neighbor list received: %d neighbors found", neighbor_list->neighbor_count);
+    
+		for (int i = 0; i < neighbor_list->neighbor_count; i++) {
+			LOG_INF("  Neighbor %d: long_rd_id=0x%08x (%u)",
+					i,
+					neighbor_list->neighbor_long_rd_ids[i],
+					neighbor_list->neighbor_long_rd_ids[i]);
+		}
+		break;
 
-		freeaddrinfo(result);
-	} else {
-		LOG_WRN("Failed to resolve peer hostname (%s): %d", peer_hostname, ret);
-		peer_resolved = false;
-	}
+	case NET_EVENT_DECT_ASSOCIATION_CHANGED:
+		const struct dect_association_changed_evt *evt = cb->info;
+
+		if(evt->association_change_type == DECT_ASSOCIATION_CREATED)
+		{
+			LOG_INF("Association created with RD 0x%08x (role: %s)",
+                    evt->long_rd_id,
+                    evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
+			);
+
+			struct dect_status_info status;
+			const struct device *dev = net_if_get_device(dect_iface);
+			const struct dect_nr_hal_api *api = dev->api;
+
+			if (api->status_info_get(dev, &status) == 0)
+			{
+				for (int i = 0; i < status.child_count; i++)
+				{
+					if (status.child_associations[i].long_rd_id == evt->long_rd_id)
+					{
+						memcpy(&peer_addr, &status.child_associations[i].local_ipv6_addr, sizeof(peer_addr));
+						peer_addr_known = true;
+
+						char addr_str[NET_IPV6_ADDR_LEN];
+						net_addr_ntop(AF_INET6, &peer_addr, addr_str, sizeof(addr_str));
+						LOG_INF("Peer IPv6: %s", addr_str);
+					}
+				}
+				for (int i = 0; i < status.parent_count; i++)
+				{
+                    if (status.parent_associations[i].long_rd_id == evt->long_rd_id)
+					{
+                        memcpy(&peer_addr, &status.parent_associations[i].local_ipv6_addr, sizeof(peer_addr));
+                        peer_addr_known = true;
+                    }
+                }
+			}
+
+		}
+		else if(evt->association_change_type == DECT_ASSOCIATION_RELEASED ||
+				evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED)
+		{
+			peer_addr_known = false;
+			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
+		}
+
+    default:
+        LOG_WRN("Unhandled DECT event: 0x%llx", event);
+        break;
+    }
 }
 
 static void hello_dect_mac_tx_demo_message(void)
@@ -342,7 +386,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 	} else if (mgmt_event == NET_EVENT_IF_DOWN) {
 		LOG_INF("DECT NR+ interface is DOWN");
 		dect_connected = false;
-		peer_resolved = false;
+		peer_addr_known = false;
 		/* Reset message counter for new session */
 		message_counter = 0;
 		hello_dect_mac_stop_udp_listener();
@@ -406,11 +450,23 @@ int main(void)
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
 
+	/* Setup callbacks for other DECT stuff */
+	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
+    	NET_EVENT_DECT_SCAN_RESULT      |
+    	NET_EVENT_DECT_RSSI_SCAN_RESULT |
+    	NET_EVENT_DECT_SCAN_DONE		|
+		NET_EVENT_DECT_NEIGHBOR_LIST	|
+		NET_EVENT_DECT_ASSOCIATION_CHANGED
+	);
+	net_mgmt_add_event_callback(&dect_event_cb);
+
 	net_mgmt_init_event_callback(&net_if_cb,
 				     net_if_event_handler,
 				     (NET_EVENT_IF_UP |
 				      NET_EVENT_IF_DOWN));
 	net_mgmt_add_event_callback(&net_if_cb);
+
+	
 
 	/* Get the DECT network interface */
 	dect_iface = net_if_get_first_by_type(&NET_L2_GET_NAME(DECT));
