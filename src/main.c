@@ -31,10 +31,6 @@
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
 
-#include "spi.h"
-#include "uart.h"
-#include <math.h>
-
 LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 /* Modem fault handler */
@@ -49,13 +45,9 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 /* Network interface */
 static struct net_if *dect_iface;
 
-uint16_t transmitter_id = CONFIG_DECT_TRANSMITTER_ID;
-
 /* Network management callback */
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
-static struct net_mgmt_event_callback dect_event_cb;
-static void check_spi_image_work_handler(struct k_work *work);
 
 /* Application state */
 static bool dect_connected;
@@ -81,19 +73,35 @@ static char *peer_hostname = "dect-nr+-ft-device.local";
 #endif
 
 /* Forward declarations */
+static void hello_dect_max_tx_work_handler(struct k_work *work);
+static void hello_dect_mac_tx_demo_message(void);
 static void hello_dect_mac_resolve_peer_address(void);
 static void hello_dect_mac_set_hostname(void);
 static void hello_dect_mac_rx_thread(void);
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size);
 
-/* TX work declaration */
-static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
+/* Demo work definition */
+static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
 static void hello_dect_led2_off_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
 #endif
+
+static void hello_dect_max_tx_work_handler(struct k_work *work)
+{
+	if (dect_connected) {
+		/* Try to resolve peer if not already resolved */
+		if (!peer_resolved) {
+			hello_dect_mac_resolve_peer_address();
+		}
+		hello_dect_mac_tx_demo_message();
+
+		/* Reschedule work */
+		k_work_schedule(&tx_work,
+				K_SECONDS(CONFIG_HELLO_DECT_MAC_DEMO_INTERVAL));
+	}
+}
 
 #if defined(CONFIG_DK_LIBRARY)
 static void hello_dect_led2_off_work_handler(struct k_work *work)
@@ -102,18 +110,6 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 	dk_set_led_off(DK_LED2);
 }
 #endif
-
-/* Image chunk definition */
-#define MAX_PAYLOAD_SIZE 1024
-struct data_packet 
-{
-	uint16_t packet_idx;
-	uint16_t total_packets;
-	size_t total_data_size;
-	uint16_t payload_len;
-	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
-	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
-};
 
 static void hello_dect_mac_resolve_peer_address(void)
 {
@@ -143,119 +139,49 @@ static void hello_dect_mac_resolve_peer_address(void)
 	}
 }
 
-static void check_spi_image_work_handler(struct k_work *work)
+static void hello_dect_mac_tx_demo_message(void)
 {
-	// First check if dect is connected so device can transmit
-	if (!dect_connected)
-	{
-		LOG_ERR("DECT not connected! Rescheduling in 10 seconds...");
-		k_work_schedule(&tx_work, K_SECONDS(10));
-		return;
-	}
-
-	// No tx if no new image is available
-    if (!spi_slave_is_new_image_available())
-	{
-		LOG_WRN("No new image available. Aborting transmission.");
-		k_work_schedule(&tx_work, K_SECONDS(10));
-		return;
-	}
-
-	const uint8_t *image_data = spi_slave_get_image_buffer();
-	size_t image_size = spi_slave_get_image_size();
-	
-	LOG_INF("New image received: %zu bytes", image_size);
-
-	//TODO: Change to FT in future.
-	// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-	if (strcmp(DEVICE_TYPE_STR, "PT") == 0)
-	{
-		struct image_metadata meta = {
-			.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
-			.hop_count = 0,
-			.seq_num = 0
-		};
-
-		int ret = uart_send_image(image_data, image_size, &meta);
-		if (ret != 0) {
-			LOG_ERR("Failed to send image via uart: %d", ret);
-		} else {
-			LOG_INF("Image forwarded to uart");
-		}
-	}
-	else if (dect_connected)
-	{
-		if (!peer_resolved)	
-			hello_dect_mac_resolve_peer_address();
-
-		hello_dect_tx_image_message(image_data, image_size);
-	}
-        
-	spi_slave_clear_image_flag();
-
-	// Reschedule work
-	k_work_schedule(&tx_work, K_SECONDS(10));
-}
-
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size)
-{
-	int sock;
-	int ret = -1;
+	int sock, ret;
+	char message[512];
 	char addr_str[NET_IPV6_ADDR_LEN];
 
+	snprintf(message, sizeof(message),
+		"Hello DECT NR+ from %s (name: %s) device! Message #%u",
+		DEVICE_TYPE_STR, local_hostname, ++message_counter);
+
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0)
-	{
+	if (sock < 0) {
 		LOG_ERR("Failed to create socket: %d", errno);
 		return;
 	}
 
-	if (peer_resolved)
-	{
+	if (peer_resolved) {
 		/* Send to discovered peer */
 		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
 		LOG_INF("Sending to peer: %s", addr_str);
 
-		uint16_t total_chunks = (image_size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
+		ret = sendto(sock, message, strlen(message), 0,
+			     (struct sockaddr *)&peer_addr, sizeof(peer_addr));
+	} else {
+		/* Fallback to multicast */
+		struct sockaddr_in6 mcast_addr = {0};
 
-		for (uint16_t i=0; i < total_chunks; i++)
-		{
-			size_t offset = i * MAX_PAYLOAD_SIZE;
-			size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
-			size_t total_size = sizeof(struct data_packet) + payload_len;
+		mcast_addr.sin6_family = AF_INET6;
+		mcast_addr.sin6_port = htons(12345);
 
-			struct data_packet *packet = malloc(total_size);
-			if (packet == NULL)
-			{
-				LOG_ERR("Memory allocation failed!");
-				return;
-			}
+		/* Well known IPv6 link local scope all nodes multicast address (FF02::1) */
+		net_ipv6_addr_create_ll_allnodes_mcast((struct in6_addr *)&mcast_addr.sin6_addr);
 
-			packet->packet_idx = i;
-			packet->total_packets = total_chunks;
-			packet->total_data_size = image_size;
-			packet->payload_len = payload_len;
+		LOG_INF("Sending to multicast (peer not resolved)");
 
-			memcpy(packet->payload, image_data + offset, packet->payload_len);
-
-			ret = sendto(sock, packet, total_size, 0,
-				(struct sockaddr *)&peer_addr, sizeof(peer_addr));
-
-			if (ret >= 0) // Success
-				LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-			else
-				LOG_ERR("Failed to send image chunk to peer: %d", ret);
-			
-			// Free the packet memory
-			free(packet);
-		}
+		ret = sendto(sock, message, strlen(message), 0,
+			     (struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
 	}
-	// TODO: Handle multicast
 
-	if (ret <= 0)
-		LOG_ERR("Failed to send image to peer: %d", ret);
-	else
-		LOG_INF("Image sent to peer!");
+	if (ret < 0) {
+		LOG_ERR("Failed to send message: %d", errno);
+	} else {
+		LOG_INF("Sent: %s", message);
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Cancel any pending LED 2 turn-off work */
@@ -265,6 +191,7 @@ static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_
 		/* Schedule LED 2 to turn off after 1 second */
 		k_work_schedule(&led2_off_work, K_SECONDS(1));
 #endif
+	}
 
 	close(sock);
 }
@@ -372,7 +299,6 @@ static void hello_dect_mac_rx_thread(void)
 			LOG_INF("Received %d bytes from %s: %s",
 				ret, addr_str, buffer);
 		}
-
 	}
 }
 
@@ -406,8 +332,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		hello_dect_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		// k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
-		// This is buggy. The shit doesnt start, so moved to manual schedule
+		k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Turn on LED 1 to indicate connection */
@@ -466,49 +391,6 @@ static void hello_dect_mac_set_hostname(void)
 	}
 }
 
-static void dect_event_handler(struct net_mgmt_event_callback *cb,
-                               uint64_t event, struct net_if *iface)
-{
-    switch (event) {
-    case NET_EVENT_DECT_SCAN_RESULT:
-        const struct dect_scan_result_evt *result = cb->info;
-
-        LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
-                result->transmitter_long_rd_id,
-                result->channel,
-				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
-        break;
-
-    case NET_EVENT_DECT_RSSI_SCAN_RESULT:
-        const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
-		const struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
-		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
-				data->channel,
-				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
-        break;
-
-    case NET_EVENT_DECT_SCAN_DONE:
-        LOG_INF("Scan complete");
-        break;
-
-	case NET_EVENT_DECT_NEIGHBOR_LIST:
-		const struct dect_neighbor_list_evt *neighbor_list = cb->info;
-		LOG_INF("Neighbor list received: %d neighbors found", neighbor_list->neighbor_count);
-    
-		for (int i = 0; i < neighbor_list->neighbor_count; i++) {
-			LOG_INF("  Neighbor %d: long_rd_id=0x%08x (%u)",
-					i,
-					neighbor_list->neighbor_long_rd_ids[i],
-					neighbor_list->neighbor_long_rd_ids[i]);
-		}
-		break;
-
-    default:
-        LOG_WRN("Unhandled DECT event: 0x%llx", event);
-        break;
-    }
-}
-
 int main(void)
 {
 	int err;
@@ -516,41 +398,13 @@ int main(void)
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 	LOG_INF("Device type: %s", DEVICE_TYPE_STR);
 
-	err = spi_slave_init();
-	if (err) {
-		LOG_ERR("Failed to initialize SPI slave: %d", err);
-	} else {
-		// Start the thread AFTER initialization
-		err = spi_slave_start_thread();
-		if (err) {
-			LOG_ERR("Failed to start SPI thread: %d", err);
-		}
-	}
-
-	err = uart_data_init();
-    if (err) {
-        LOG_ERR("Failed to initialize uart: %d", err);
-    } else {
-        LOG_INF("uart ready for image transfer");
-    }
-
 	/* Set hostname based on device type */
 	hello_dect_mac_set_hostname();
 
 	/* Setup network management callbacks for L4 connected/disconnected events */
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
-
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
-
-	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    	NET_EVENT_DECT_SCAN_RESULT      |
-    	NET_EVENT_DECT_RSSI_SCAN_RESULT |
-    	NET_EVENT_DECT_SCAN_DONE		|
-		NET_EVENT_DECT_NEIGHBOR_LIST
-	);
-
-	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
 				     net_if_event_handler,
@@ -601,15 +455,12 @@ int main(void)
 	}
 #endif
 	LOG_INF("Hello DECT application started successfully");
-	
 #if defined(CONFIG_DK_LIBRARY)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
-	
-	/* Main application loop - schedule tx work and run UDP receive in main thread */
-	k_work_schedule(&tx_work, K_SECONDS(5));
-	
+
+	/* Main application loop - run UDP receive in main thread */
 	hello_dect_mac_rx_thread();
-	
+
 	return 0;
 }
