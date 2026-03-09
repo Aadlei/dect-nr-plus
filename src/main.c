@@ -103,9 +103,6 @@ static void hello_dect_led2_off_work_handler(struct k_work *work)
 }
 #endif
 
-/* Image chunk definition */
-#define MAX_PAYLOAD_SIZE 1024
-
 static void hello_dect_mac_resolve_peer_address(void)
 {
 	int ret;
@@ -159,7 +156,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 
 	//TODO: Change to FT in future.
 	// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-	if (strcmp(DEVICE_TYPE_STR, "FT") == 0)
+	if (strcmp(DEVICE_TYPE_STR, "PT") == 0)
 	{
 		struct image_metadata meta = {
 			.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.

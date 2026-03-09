@@ -4,7 +4,7 @@
 #include <zephyr/kernel.h>
 #include <stdint.h>
 
-#define MAX_PAYLOAD_SIZE 1024
+#define MAX_PAYLOAD_SIZE 2048
 #define CHUNK_BUF_SIZE   (12 + MAX_PAYLOAD_SIZE)  /* data_packet header + payload */
 #define CHUNK_POOL_COUNT 4
 
