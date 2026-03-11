@@ -73,8 +73,9 @@ static void hello_dect_mac_rx_thread(void);
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
 
-// Semaphor for activation
+// Semaphor for right order of events in main
 K_SEM_DEFINE(dect_activate_sem, 0, 1);
+K_SEM_DEFINE(dect_network_joined, 0, 1);
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
@@ -181,8 +182,26 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 				evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED)
 		{
 			peer_addr_known = false;
-			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
+			LOG_INF("Association lost with RD 0x%ux", evt->long_rd_id);
 		}
+
+		break;
+
+	case NET_EVENT_DECT_NETWORK_STATUS:
+		const struct dect_network_status_evt *status = cb->info;
+
+		if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+		{
+			LOG_INF("Network joined. Safe to start own cluster.");
+			k_sem_give(&dect_network_joined);
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
+		{
+			LOG_INF("Network unjoined.");
+		}
+
+		// TODO: Code here if network is quit or something
+		break;
 
     default:
         LOG_WRN("Unhandled DECT event: 0x%llx", event);
@@ -373,7 +392,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		hello_dect_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
+		//k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Turn on LED 1 to indicate connection */
@@ -459,6 +478,34 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 	}
 }
 
+static void read_and_write_settings(void)
+{
+	// Read and write settings
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+	}
+	else
+	{
+		struct dect_settings *cp_dev_settings = malloc(sizeof(struct dect_settings));
+		memcpy(cp_dev_settings, &dev_settings, sizeof(dev_settings));
+
+		cp_dev_settings->device_type = current_role;
+		cp_dev_settings->cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+
+		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, cp_dev_settings, sizeof(*cp_dev_settings));
+		if (ret)
+		{
+			LOG_ERR("Failed to write settings: %d", ret);
+			return;
+		}
+
+		LOG_INF("DECT settings read and set.");
+		free(cp_dev_settings);
+	}
+}
+
 int main(void)
 {
 	int err;
@@ -480,11 +527,12 @@ int main(void)
 
 	// Setup callbacks for other DECT stuff 
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    	NET_EVENT_DECT_SCAN_RESULT      |
-    	NET_EVENT_DECT_RSSI_SCAN_RESULT |
-    	NET_EVENT_DECT_SCAN_DONE		|
-		NET_EVENT_DECT_NEIGHBOR_LIST	|
-		NET_EVENT_DECT_ASSOCIATION_CHANGED);
+    	NET_EVENT_DECT_SCAN_RESULT      	|
+    	NET_EVENT_DECT_RSSI_SCAN_RESULT 	|
+    	NET_EVENT_DECT_SCAN_DONE			|
+		NET_EVENT_DECT_NEIGHBOR_LIST		|
+		NET_EVENT_DECT_ASSOCIATION_CHANGED	|
+		NET_EVENT_DECT_NETWORK_STATUS);
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
@@ -513,30 +561,7 @@ int main(void)
 	LOG_INF("Wait for DECT stack to activate...");
 	k_sem_take(&dect_activate_sem, K_FOREVER);
 
-	// Read and write settings
-	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-	}
-	else
-	{
-		struct dect_settings *cp_dev_settings = malloc(sizeof(struct dect_settings));
-		memcpy(cp_dev_settings, &dev_settings, sizeof(dev_settings));
-
-		cp_dev_settings->device_type = current_role;
-		cp_dev_settings->cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
-
-		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, cp_dev_settings, sizeof(*cp_dev_settings));
-		if (ret)
-		{
-			LOG_ERR("Failed to write settings: %d", ret);
-			return -1;
-		}
-
-		LOG_INF("DECT settings read and set.");
-		free(cp_dev_settings);
-	}
+	read_and_write_settings();
 
 #if defined(CONFIG_DK_LIBRARY)
 	/* Initialize DK library for buttons and LEDs */
@@ -569,8 +594,13 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
+	// Block until connection established
+	LOG_INF("Blocking until network joined.");
+	k_sem_take(&dect_network_joined, K_FOREVER);
+
+
 	/* Main application loop - run UDP receive in main thread */
-	//hello_dect_mac_rx_thread();
+	hello_dect_mac_rx_thread();
 
 	return 0;
 }
