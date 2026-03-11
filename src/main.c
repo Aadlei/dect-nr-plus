@@ -48,6 +48,7 @@ static struct net_if *dect_iface;
 /* Network management callback */
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
+static struct net_mgmt_event_callback net_activate_cb;
 static struct net_mgmt_event_callback dect_event_cb;
 
 /* Application state */
@@ -69,6 +70,9 @@ static void hello_dect_mac_rx_thread(void);
 
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
+
+// Semaphor for activation
+K_SEM_DEFINE(dect_activate_sem, 0, 1);
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
@@ -188,7 +192,6 @@ static void hello_dect_mac_tx_demo_message(void)
 {
 	int sock, ret;
 	char message[512];
-	char addr_str[NET_IPV6_ADDR_LEN];
 
 	snprintf(message, sizeof(message),
 		"Hello DECT NR+ from device %d! Message #%u",
@@ -430,28 +433,56 @@ static void hello_dect_mac_set_hostname(void)
 	}
 }
 
+static void net_activate_handler(struct net_mgmt_event_callback *cb,
+				 uint64_t event, struct net_if *iface)
+{
+	// Only handle events for our DECT interface
+	if (iface != dect_iface) {
+		return;
+	}
+	
+	if (event == NET_EVENT_DECT_ACTIVATE_DONE)
+	{
+		const enum dect_status_values *status = cb->info;
+
+		if(*status == DECT_STATUS_OK)
+		{
+			LOG_INF("DECT stack activated successfully.");
+			k_sem_give(&dect_activate_sem);
+		}
+		else
+		{
+			LOG_ERR("DECT stack activation failed: %d", *status);
+		}
+	}
+}
+
 int main(void)
 {
 	int err;
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 
-	/* Set hostname based on device type */
+	// Set hostname based on device type
 	hello_dect_mac_set_hostname();
 
-	/* Setup network management callbacks for L4 connected/disconnected events */
+	// Setup network management callbacks for L4 connected/disconnected events
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
 
-	/* Setup callbacks for other DECT stuff */
+	// Setup callback for modem activation event
+	net_mgmt_init_event_callback(&net_activate_cb, net_activate_handler,
+		NET_EVENT_DECT_ACTIVATE_DONE);
+	net_mgmt_add_event_callback(&net_activate_cb);
+
+	// Setup callbacks for other DECT stuff 
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
     	NET_EVENT_DECT_SCAN_RESULT      |
     	NET_EVENT_DECT_RSSI_SCAN_RESULT |
     	NET_EVENT_DECT_SCAN_DONE		|
 		NET_EVENT_DECT_NEIGHBOR_LIST	|
-		NET_EVENT_DECT_ASSOCIATION_CHANGED
-	);
+		NET_EVENT_DECT_ASSOCIATION_CHANGED);
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
@@ -459,8 +490,6 @@ int main(void)
 				     (NET_EVENT_IF_UP |
 				      NET_EVENT_IF_DOWN));
 	net_mgmt_add_event_callback(&net_if_cb);
-
-	
 
 	/* Get the DECT network interface */
 	dect_iface = net_if_get_first_by_type(&NET_L2_GET_NAME(DECT));
@@ -477,6 +506,10 @@ int main(void)
 		return err;
 	}
 #endif
+
+	// Block until DECT is activated
+	LOG_INF("Wait for DECT stack to activate...");
+	k_sem_take(&dect_activate_sem, K_FOREVER);
 
 #if defined(CONFIG_DK_LIBRARY)
 	/* Initialize DK library for buttons and LEDs */
