@@ -56,6 +56,8 @@ static char local_hostname[32];
 static struct net_in6_addr peer_addr;
 static bool peer_addr_known = false;
 static bool dect_connected;
+static struct dect_settings dev_settings = {0};
+static dect_device_type_t current_role = DECT_DEVICE_TYPE_PT;
 static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
@@ -511,6 +513,31 @@ int main(void)
 	LOG_INF("Wait for DECT stack to activate...");
 	k_sem_take(&dect_activate_sem, K_FOREVER);
 
+	// Read and write settings
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+	}
+	else
+	{
+		struct dect_settings *cp_dev_settings = malloc(sizeof(struct dect_settings));
+		memcpy(cp_dev_settings, &dev_settings, sizeof(dev_settings));
+
+		cp_dev_settings->device_type = current_role;
+		cp_dev_settings->cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+
+		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, cp_dev_settings, sizeof(*cp_dev_settings));
+		if (ret)
+		{
+			LOG_ERR("Failed to write settings: %d", ret);
+			return -1;
+		}
+
+		LOG_INF("DECT settings read and set.");
+		free(cp_dev_settings);
+	}
+
 #if defined(CONFIG_DK_LIBRARY)
 	/* Initialize DK library for buttons and LEDs */
 	err = dk_buttons_init(button_handler);
@@ -543,7 +570,7 @@ int main(void)
 #endif
 
 	/* Main application loop - run UDP receive in main thread */
-	hello_dect_mac_rx_thread();
+	//hello_dect_mac_rx_thread();
 
 	return 0;
 }
