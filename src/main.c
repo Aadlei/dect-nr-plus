@@ -31,7 +31,10 @@
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
 
-LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
+// CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+
+LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 /* Modem fault handler */
 void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
@@ -57,7 +60,6 @@ static struct net_in6_addr peer_addr;
 static bool peer_addr_known = false;
 static bool dect_connected;
 static struct dect_settings dev_settings = {0};
-static dect_device_type_t current_role = DECT_DEVICE_TYPE_PT;
 static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
@@ -65,13 +67,13 @@ static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 #define SOCKET_RECV_TIMEOUT_SEC 5
 
 /* Forward declarations */
-static void hello_dect_max_tx_work_handler(struct k_work *work);
-static void hello_dect_mac_tx_demo_message(void);
-static void hello_dect_mac_set_hostname(void);
-static void hello_dect_mac_rx_thread(void);
+static void main_max_tx_work_handler(struct k_work *work);
+static void main_mac_tx_demo_message(void);
+static void main_mac_set_hostname(void);
+static void main_mac_rx_thread(void);
 
 /* Demo work definition */
-static K_WORK_DELAYABLE_DEFINE(tx_work, hello_dect_max_tx_work_handler);
+static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
 
 // Semaphor for right order of events in main
 K_SEM_DEFINE(dect_activate_sem, 0, 1);
@@ -79,23 +81,23 @@ K_SEM_DEFINE(dect_network_joined, 0, 1);
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
-static void hello_dect_led2_off_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
+static void main_led2_off_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(led2_off_work, main_led2_off_work_handler);
 #endif
 
-static void hello_dect_max_tx_work_handler(struct k_work *work)
+static void main_max_tx_work_handler(struct k_work *work)
 {
 	if (dect_connected) {
-		hello_dect_mac_tx_demo_message();
+		main_mac_tx_demo_message();
 
 		/* Reschedule work */
 		k_work_schedule(&tx_work,
-				K_SECONDS(CONFIG_HELLO_DECT_MAC_DEMO_INTERVAL));
+				K_SECONDS(30));
 	}
 }
 
 #if defined(CONFIG_DK_LIBRARY)
-static void hello_dect_led2_off_work_handler(struct k_work *work)
+static void main_led2_off_work_handler(struct k_work *work)
 {
 	/* Turn off LED 2 after 1 second delay */
 	dk_set_led_off(DK_LED2);
@@ -108,9 +110,12 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     switch (event) {
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
+		const struct dect_route_info *sink_result = &result->route_info;
 
-        LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
+        LOG_INF("Found FT: long_rd_id=%u, has_route_info=%s sink_long_rd_id=%u channel=%u, rssi=%d",
                 result->transmitter_long_rd_id,
+				result->has_route_info ? "true" : "false",
+				sink_result->sink_address,
                 result->channel,
 				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
         break;
@@ -209,7 +214,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     }
 }
 
-static void hello_dect_mac_tx_demo_message(void)
+static void main_mac_tx_demo_message(void)
 {
 	int sock, ret;
 	char message[512];
@@ -257,13 +262,13 @@ static void hello_dect_mac_tx_demo_message(void)
 	close(sock);
 }
 
-static void hello_dect_mac_print_network_info(struct net_if *iface)
+static void main_mac_print_network_info(struct net_if *iface)
 {
 	LOG_INF("=== Network Interface Information ===");
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
-static int hello_dect_mac_start_udp_listener(void)
+static int main_mac_start_udp_listener(void)
 {
 	struct sockaddr_in6 addr = {0};
 	struct timeval timeout = {
@@ -306,7 +311,7 @@ static int hello_dect_mac_start_udp_listener(void)
 	return 0;
 }
 
-static void hello_dect_mac_stop_udp_listener(void)
+static void main_mac_stop_udp_listener(void)
 {
 	int sock = atomic_get(&recv_socket_atomic);
 
@@ -317,7 +322,7 @@ static void hello_dect_mac_stop_udp_listener(void)
 	}
 }
 
-static void hello_dect_mac_rx_thread(void)
+static void main_mac_rx_thread(void)
 {
 	char buffer[256];
 	struct sockaddr_in6 src_addr;
@@ -386,10 +391,10 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 	if (mgmt_event == NET_EVENT_IF_UP) {
 		LOG_INF("DECT NR+ interface is UP with local IPv6 addressing");
 		dect_connected = true;
-		hello_dect_mac_print_network_info(iface);
+		main_mac_print_network_info(iface);
 
 		/* Start UDP listener */
-		hello_dect_mac_start_udp_listener();
+		main_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
 		//k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
@@ -405,7 +410,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		peer_addr_known = false;
 		/* Reset message counter for new session */
 		message_counter = 0;
-		hello_dect_mac_stop_udp_listener();
+		main_mac_stop_udp_listener();
 		k_work_cancel_delayable(&tx_work);
 
 #if defined(CONFIG_DK_LIBRARY)
@@ -442,7 +447,7 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 }
 #endif
 
-static void hello_dect_mac_set_hostname(void)
+static void main_mac_set_hostname(void)
 {
 	snprintf(local_hostname, sizeof(local_hostname),
 		"dev-%d", CONFIG_DECT_TRANSMITTER_ID);
@@ -491,7 +496,7 @@ static void read_and_write_settings(void)
 		struct dect_settings *cp_dev_settings = malloc(sizeof(struct dect_settings));
 		memcpy(cp_dev_settings, &dev_settings, sizeof(dev_settings));
 
-		cp_dev_settings->device_type = current_role;
+		cp_dev_settings->device_type = current_device_type;
 		cp_dev_settings->cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
 
 		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, cp_dev_settings, sizeof(*cp_dev_settings));
@@ -512,8 +517,10 @@ int main(void)
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 
+	/* --- Independent setup and initialization ---*/
+
 	// Set hostname based on device type
-	hello_dect_mac_set_hostname();
+	main_mac_set_hostname();
 
 	// Setup network management callbacks for L4 connected/disconnected events
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
@@ -548,7 +555,7 @@ int main(void)
 		return -ENODEV;
 	}
 
-	/* Initialize modem library and this triggers DECT NR+ stack initialization */
+	// Initialize modem library and this triggers DECT NR+ stack initialization
 #if defined(CONFIG_NRF_MODEM_LIB)
 	err = nrf_modem_lib_init();
 	if (err) {
@@ -578,6 +585,8 @@ int main(void)
 		dk_set_led_off(DK_LED1);
 		dk_set_led_off(DK_LED2);
 	}
+
+	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
 #if !defined(CONFIG_NET_L2_DECT_CONN_MGR_AUTO_CONNECT)
@@ -589,18 +598,43 @@ int main(void)
 		return err;
 	}
 #endif
+
 	LOG_INF("Hello DECT application started successfully");
-#if defined(CONFIG_DK_LIBRARY)
-	LOG_INF("Press button 1 to connect, button 2 to disconnect");
-#endif
 
-	// Block until connection established
-	LOG_INF("Blocking until network joined.");
-	k_sem_take(&dect_network_joined, K_FOREVER);
 
+	/* --- Sink FT and regular FTPT specific --- */
+
+	// Sink FT
+	if (current_device_type == DECT_DEVICE_TYPE_FT)
+	{
+		// Todo: Starte network og sink
+	}
+	// Regular FTPT (FTs and PTs)
+	else if (current_device_type == DECT_DEVICE_TYPE_PT)
+	{
+		// Block until connection established
+		LOG_INF("Blocking until network joined.");
+		k_sem_take(&dect_network_joined, K_FOREVER);
+
+		struct dect_scan_params scan_params = 
+		{
+			.band = 0,
+			.channel_count = 1,
+			.channel_list = { 1657 },
+			.channel_scan_time_ms = 500,
+		};
+
+		err = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params));
+	}
+	else
+	{
+		LOG_ERR("Invalid device type: 0x%08x", current_device_type);
+		while(1)
+			k_sleep(K_SECONDS(1));
+	}
 
 	/* Main application loop - run UDP receive in main thread */
-	hello_dect_mac_rx_thread();
+	// main_mac_rx_thread();
 
 	return 0;
 }
