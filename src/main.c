@@ -32,7 +32,7 @@
 #include <net/dect/dect_net_l2.h>
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -77,7 +77,8 @@ static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
 
 // Semaphor for right order of events in main
 K_SEM_DEFINE(dect_activate_sem, 0, 1);
-K_SEM_DEFINE(dect_network_joined, 0, 1);
+K_SEM_DEFINE(dect_network_created_sem, 0, 1); // For sink
+K_SEM_DEFINE(dect_network_joined_sem, 0, 1); // For else
 
 /* LED 2 turn-off work definition */
 #if defined(CONFIG_DK_LIBRARY)
@@ -195,17 +196,47 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 	case NET_EVENT_DECT_NETWORK_STATUS:
 		const struct dect_network_status_evt *status = cb->info;
 
-		if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+		if (status->network_status == DECT_NETWORK_STATUS_CREATED)
 		{
-			LOG_INF("Network joined. Safe to start own cluster.");
-			k_sem_give(&dect_network_joined);
+			LOG_INF("Network created. Starting beacon...");
+
+			struct dect_nw_beacon_start_req_params nw_beacon_params = {
+				.channel = 1657,
+				.additional_ch_count = 0,
+			};
+			
+			net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params));
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+		{
+			LOG_INF("Network joined. Safe to start own cluster");
+			k_sem_give(&dect_network_joined_sem);
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
-			LOG_INF("Network unjoined.");
+			LOG_INF("Network unjoined");
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
+		{
+			LOG_ERR("Network error: %d", status->network_status);
 		}
 
 		// TODO: Code here if network is quit or something
+		break;
+
+	case NET_EVENT_DECT_NW_BEACON_START_RESULT:
+		const struct dect_common_resp_evt *res = cb->info;
+
+		if (res->status == DECT_STATUS_OK)
+		{
+			LOG_INF("Network beacon successfully created");
+			k_sem_give(&dect_network_joined_sem);
+		}
+		else
+		{
+			LOG_ERR("Network beacon failed: 0x%08x", res->status);
+		}
+
 		break;
 
     default:
@@ -493,21 +524,19 @@ static void read_and_write_settings(void)
 	}
 	else
 	{
-		struct dect_settings *cp_dev_settings = malloc(sizeof(struct dect_settings));
-		memcpy(cp_dev_settings, &dev_settings, sizeof(dev_settings));
+		struct dect_settings cp_dev_settings = dev_settings;
 
-		cp_dev_settings->device_type = current_device_type;
-		cp_dev_settings->cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+		cp_dev_settings.device_type = current_device_type;
+		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
 
-		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, cp_dev_settings, sizeof(*cp_dev_settings));
+		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
 		if (ret)
 		{
 			LOG_ERR("Failed to write settings: %d", ret);
 			return;
 		}
 
-		LOG_INF("DECT settings read and set.");
-		free(cp_dev_settings);
+		LOG_INF("DECT settings read and set");
 	}
 }
 
@@ -539,7 +568,8 @@ int main(void)
     	NET_EVENT_DECT_SCAN_DONE			|
 		NET_EVENT_DECT_NEIGHBOR_LIST		|
 		NET_EVENT_DECT_ASSOCIATION_CHANGED	|
-		NET_EVENT_DECT_NETWORK_STATUS);
+		NET_EVENT_DECT_NETWORK_STATUS		|
+		NET_EVENT_DECT_NW_BEACON_START_RESULT);
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
@@ -589,8 +619,9 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
-#if !defined(CONFIG_NET_L2_DECT_CONN_MGR_AUTO_CONNECT)
-	/* Initiate connection using connection manager */
+// Todo: Swap this with manual stuff, because we dont know what is going on here
+/*#if !defined(CONFIG_NET_L2_DECT_CONN_MGR_AUTO_CONNECT)
+	// Initiate connection using connection manager
 	LOG_INF("Initiating DECT connection...");
 	err = conn_mgr_if_connect(dect_iface);
 	if (err) {
@@ -598,7 +629,7 @@ int main(void)
 		return err;
 	}
 #endif
-
+*/
 	LOG_INF("Hello DECT application started successfully");
 
 
@@ -607,14 +638,35 @@ int main(void)
 	// Sink FT
 	if (current_device_type == DECT_DEVICE_TYPE_FT)
 	{
-		// Todo: Starte network og sink
+		// What autoconnect does:
+		// 1. Network scan
+		// 2. RSSI scan
+		// 3. Starting cluster on best channel
+		// 4. Cluster configured
+		// 5. Network created
+
+		// Manual stuff:
+		// 1. RSSI scan
+		// 2. Create network
+		// 3. Network beacon
+		// 4. Create cluster
+		// 5. Cluster beacon
+
+		// RSSI scan
+		
+		// Create network and beacon
+		net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0);
+		
+		// Block until network created and beacon transmitted
+		LOG_INF("Blocking until network created");
+		k_sem_take(&dect_network_created_sem, K_FOREVER);
 	}
 	// Regular FTPT (FTs and PTs)
 	else if (current_device_type == DECT_DEVICE_TYPE_PT)
 	{
 		// Block until connection established
-		LOG_INF("Blocking until network joined.");
-		k_sem_take(&dect_network_joined, K_FOREVER);
+		LOG_INF("Blocking until network joined");
+		k_sem_take(&dect_network_joined_sem, K_FOREVER);
 
 		struct dect_scan_params scan_params = 
 		{
@@ -625,16 +677,21 @@ int main(void)
 		};
 
 		err = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params));
+		if (err)
+		{
+			LOG_ERR("Failed to perform DECT scan: %d", err);
+		}
 	}
 	else
 	{
 		LOG_ERR("Invalid device type: 0x%08x", current_device_type);
-		while(1)
-			k_sleep(K_SECONDS(1));
 	}
 
 	/* Main application loop - run UDP receive in main thread */
 	// main_mac_rx_thread();
+
+	while(1)
+		k_sleep(K_SECONDS(1));
 
 	return 0;
 }
