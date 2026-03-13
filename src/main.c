@@ -59,6 +59,7 @@ static char local_hostname[32];
 static struct net_in6_addr peer_addr;
 static bool peer_addr_known = false;
 static bool dect_connected;
+static bool nw_beacon_started = false;
 static struct dect_settings dev_settings = {0};
 static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
@@ -71,6 +72,7 @@ static void main_max_tx_work_handler(struct k_work *work);
 static void main_mac_tx_demo_message(void);
 static void main_mac_set_hostname(void);
 static void main_mac_rx_thread(void);
+static void set_ipv6_prefix(void);
 
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
@@ -198,14 +200,20 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		if (status->network_status == DECT_NETWORK_STATUS_CREATED)
 		{
-			LOG_INF("Network created. Starting beacon...");
+			if (!nw_beacon_started)
+			{
+				LOG_INF("Network created. Starting beacon...");
 
-			struct dect_nw_beacon_start_req_params nw_beacon_params = {
-				.channel = 1657,
-				.additional_ch_count = 0,
-			};
-			
-			net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params));
+				struct dect_nw_beacon_start_req_params nw_beacon_params = {
+					.channel = 1657,
+					.additional_ch_count = 0,
+				};
+				
+				set_ipv6_prefix();
+				net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params));
+
+				nw_beacon_started = true;
+			}
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
 		{
@@ -538,6 +546,16 @@ static void read_and_write_settings(void)
 
 		LOG_INF("DECT settings read and set");
 	}
+}
+
+static void set_ipv6_prefix(void)
+{
+	struct dect_net_l2_context *ctx = net_if_l2_data(dect_iface);
+
+	net_addr_pton(AF_INET6, "fd12:3456::789a::", &ctx->ipv6_prefix_cfg.prefix);
+	ctx->ipv6_prefix_cfg.prefix_len	= 64;
+
+	LOG_INF("IPv6 ULA configured on sink");
 }
 
 int main(void)
