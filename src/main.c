@@ -30,9 +30,13 @@
 
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
+#include <net/dect/dect_utils.h>
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+static char *mesh_prefix_str = "fd12:3456:789a::";
+static struct in6_addr mesh_prefix;
+#define DECT_SINK_LONG_RD_ID 0x67214200U
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -72,7 +76,7 @@ static void main_max_tx_work_handler(struct k_work *work);
 static void main_mac_tx_demo_message(void);
 static void main_mac_set_hostname(void);
 static void main_mac_rx_thread(void);
-static void set_ipv6_prefix(void);
+static void construct_and_add_global_addr(void);
 
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
@@ -115,7 +119,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
 
-        LOG_INF("Found FT: long_rd_id=%u, has_route_info=%s sink_long_rd_id=%u channel=%u, rssi=%d",
+        LOG_INF("Found FT: long_rd_id=0x%08x, has_route_info=%s sink_long_rd_id=0x%08x channel=%u, rssi=%d",
                 result->transmitter_long_rd_id,
 				result->has_route_info ? "true" : "false",
 				sink_result->sink_address,
@@ -157,6 +161,9 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
                     evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
 			);
 
+			// Configure global IPv6
+			construct_and_add_global_addr();
+
 			struct dect_status_info status;
 			const struct device *dev = net_if_get_device(dect_iface);
 			const struct dect_nr_hal_api *api = dev->api;
@@ -190,7 +197,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 				evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED)
 		{
 			peer_addr_known = false;
-			LOG_INF("Association lost with RD 0x%ux", evt->long_rd_id);
+			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
 		}
 
 		break;
@@ -204,12 +211,14 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 			{
 				LOG_INF("Network created. Starting beacon...");
 
+				// Configure IPv6 address
+				construct_and_add_global_addr();
+
 				struct dect_nw_beacon_start_req_params nw_beacon_params = {
 					.channel = 1657,
 					.additional_ch_count = 0,
 				};
-				
-				set_ipv6_prefix();
+
 				net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params));
 
 				nw_beacon_started = true;
@@ -238,7 +247,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		if (res->status == DECT_STATUS_OK)
 		{
 			LOG_INF("Network beacon successfully created");
-			k_sem_give(&dect_network_joined_sem);
+			k_sem_give(&dect_network_created_sem);
 		}
 		else
 		{
@@ -532,10 +541,16 @@ static void read_and_write_settings(void)
 	}
 	else
 	{
+		// Also set rd id and prefix fields
+		net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
+
 		struct dect_settings cp_dev_settings = dev_settings;
 
+		if(current_device_type & DECT_DEVICE_TYPE_FT) // Only change long rd id if this is sink
+			cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+		
 		cp_dev_settings.device_type = current_device_type;
-		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
 
 		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
 		if (ret)
@@ -548,14 +563,32 @@ static void read_and_write_settings(void)
 	}
 }
 
-static void set_ipv6_prefix(void)
+static void construct_and_add_global_addr(void)
 {
-	struct dect_net_l2_context *ctx = net_if_l2_data(dect_iface);
+	// TODO: Maybe mutex on dev_settings
+	net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
 
-	net_addr_pton(AF_INET6, "fd12:3456::789a::", &ctx->ipv6_prefix_cfg.prefix);
-	ctx->ipv6_prefix_cfg.prefix_len	= 64;
+	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
 
-	LOG_INF("IPv6 ULA configured on sink");
+	struct in6_addr global_addr;
+	bool ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		this_rd_id,
+		&global_addr
+	);
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
+
+	char addr_str[NET_IPV6_ADDR_LEN];
+	net_addr_ntop(AF_INET6, &global_addr, addr_str, sizeof(addr_str));
+	LOG_INF("Adding global IPv6: %s", addr_str);
+
+	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
+
 }
 
 int main(void)
@@ -682,6 +715,18 @@ int main(void)
 	// Regular FTPT (FTs and PTs)
 	else if (current_device_type == DECT_DEVICE_TYPE_PT)
 	{
+		// What autoconnect does:
+		// 1. Network scan
+		// 2. Trigger association
+
+		// Manual stuff:
+		LOG_INF("Initiating DECT connection...");	
+		err = conn_mgr_if_connect(dect_iface);
+		if (err) {
+			LOG_ERR("Failed to initiate connection: %d", err);
+			return err;
+		}
+
 		// Block until connection established
 		LOG_INF("Blocking until network joined");
 		k_sem_take(&dect_network_joined_sem, K_FOREVER);
