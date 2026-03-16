@@ -550,7 +550,7 @@ static void read_and_write_settings(void)
 			cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
 		
 		cp_dev_settings.device_type = current_device_type;
-		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
+		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE | DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
 
 		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
 		if (ret)
