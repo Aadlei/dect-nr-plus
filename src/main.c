@@ -33,11 +33,21 @@
 #include <net/dect/dect_utils.h>
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static bool is_sink = true;
 static char *mesh_prefix_str = "fd12:3456:789a::";
 static uint16_t common_port = 12345;
 static struct in6_addr mesh_prefix;
 #define DECT_SINK_LONG_RD_ID 0x67214200U
+static bool nw_beacon_started = false;
+
+static void run_as_ft_sink(void);
+static void start_nw_beacon(void);
+
+static void run_as_ftpt(void);
+static void start_ftpt_cluster(void);
+
+static void create_global_ipv6(void);
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -60,12 +70,9 @@ static struct net_mgmt_event_callback net_activate_cb;
 static struct net_mgmt_event_callback dect_event_cb;
 
 /* Application state */
-static char local_hostname[32];
 static struct net_in6_addr peer_addr;
 static bool peer_addr_known = false;
 static bool dect_connected;
-static bool nw_beacon_started = false;
-static struct dect_settings dev_settings = {0};
 static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
@@ -75,9 +82,7 @@ static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 /* Forward declarations */
 static void main_max_tx_work_handler(struct k_work *work);
 static void main_mac_tx_demo_message(void);
-static void main_mac_set_hostname(void);
 static void main_mac_rx_thread(void);
-static void construct_and_add_global_addr(void);
 
 /* Demo work definition */
 static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
@@ -115,7 +120,46 @@ static void main_led2_off_work_handler(struct k_work *work)
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
                                uint64_t event, struct net_if *iface)
 {
-    switch (event) {
+    switch (event)
+	{
+		case NET_EVENT_DECT_NETWORK_STATUS:
+			const struct dect_network_status_evt *status = cb->info;
+
+			if (status->network_status == DECT_NETWORK_STATUS_CREATED)
+			{
+				LOG_INF("Network created");
+				if (!nw_beacon_started)
+				{
+					nw_beacon_started = true;
+					start_nw_beacon();
+				}
+			}
+			else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+			{
+				LOG_INF("Network joined. Safe to start own cluster");
+				start_ftpt_cluster();
+				k_sem_give(&dect_network_joined_sem);
+			}
+			else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
+			{
+				LOG_INF("Network unjoined");
+			}
+			else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
+			{
+				LOG_ERR("Network failure");
+			}
+			else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
+			{
+				LOG_ERR("Network removed");
+			}
+
+			// TODO: Code here if network is quit or something
+			break;
+
+		case NET_EVENT_DECT_CLUSTER_CREATED_RESULT:
+			LOG_INF("Cluster created");
+			break;
+
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
@@ -162,9 +206,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
                     evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
 			);
 
-			// Configure global IPv6
-			construct_and_add_global_addr();
-
 			struct dect_status_info status;
 			const struct device *dev = net_if_get_device(dect_iface);
 			const struct dect_nr_hal_api *api = dev->api;
@@ -203,51 +244,12 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		break;
 
-	case NET_EVENT_DECT_NETWORK_STATUS:
-		const struct dect_network_status_evt *status = cb->info;
-
-		if (status->network_status == DECT_NETWORK_STATUS_CREATED)
-		{
-			if (!nw_beacon_started)
-			{
-				LOG_INF("Network created. Starting beacon...");
-
-				// Configure IPv6 address
-				construct_and_add_global_addr();
-
-				struct dect_nw_beacon_start_req_params nw_beacon_params = {
-					.channel = 1657,
-					.additional_ch_count = 0,
-				};
-
-				net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params));
-
-				nw_beacon_started = true;
-			}
-		}
-		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
-		{
-			LOG_INF("Network joined. Safe to start own cluster");
-			k_sem_give(&dect_network_joined_sem);
-		}
-		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
-		{
-			LOG_INF("Network unjoined");
-		}
-		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
-		{
-			LOG_ERR("Network error: %d", status->network_status);
-		}
-
-		// TODO: Code here if network is quit or something
-		break;
-
 	case NET_EVENT_DECT_NW_BEACON_START_RESULT:
 		const struct dect_common_resp_evt *res = cb->info;
 
 		if (res->status == DECT_STATUS_OK)
 		{
-			LOG_INF("Network beacon successfully created");
+			LOG_INF("Network beacon successfully created and running");
 			k_sem_give(&dect_network_created_sem);
 		}
 		else
@@ -269,6 +271,8 @@ static void main_mac_tx_demo_message(void)
 	char message[512];
 
 	// Read long RD ID to put in message
+	struct dect_settings dev_settings = {0};
+
 	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
 	if (ret)
 	{
@@ -299,21 +303,23 @@ static void main_mac_tx_demo_message(void)
 	bool ok;
 	if (message_counter % 2 == 0)
 	{
+		// Wrong destination address
 		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-		mesh_prefix,
-		DECT_SINK_LONG_RD_ID,
-		0x12345678,
-		&sock_addr.sin6_addr
-	);
+			mesh_prefix,
+			DECT_SINK_LONG_RD_ID,
+			0x12345678,
+			&sock_addr.sin6_addr
+		);
 	}
 	else
 	{
+		// Sink address
 		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-		mesh_prefix,
-		DECT_SINK_LONG_RD_ID,
-		DECT_SINK_LONG_RD_ID,
-		&sock_addr.sin6_addr
-	);
+			mesh_prefix,
+			DECT_SINK_LONG_RD_ID,
+			DECT_SINK_LONG_RD_ID,
+			&sock_addr.sin6_addr
+		);
 	}
 	
 	if(!ok)
@@ -493,7 +499,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		main_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		if (current_device_type & DECT_DEVICE_TYPE_PT)
+		if (is_sink)
 			k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
 
 #if defined(CONFIG_DK_LIBRARY)
@@ -544,18 +550,6 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 }
 #endif
 
-static void main_mac_set_hostname(void)
-{
-	snprintf(local_hostname, sizeof(local_hostname),
-		"dev-%d", CONFIG_DECT_TRANSMITTER_ID);
-
-	if (net_hostname_set(local_hostname, strlen(local_hostname))) {
-		LOG_ERR("Failed to set hostname %s", local_hostname);
-	} else {
-		LOG_INF("Hostname set to: %s", local_hostname);
-	}
-}
-
 static void net_activate_handler(struct net_mgmt_event_callback *cb,
 				 uint64_t event, struct net_if *iface)
 {
@@ -580,9 +574,11 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 	}
 }
 
-static void read_and_write_settings(void)
+static void create_global_ipv6(void)
 {
-	// Read and write settings
+	// Read settings
+	struct dect_settings dev_settings = {0};
+
 	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
 	if (ret)
 	{
@@ -590,85 +586,149 @@ static void read_and_write_settings(void)
 		return;
 	}
 
-	// Also set rd id and prefix fields
+	// Construct global IPv6 address
+	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
+	struct in6_addr global_addr;
+	bool create_ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		this_rd_id,
+		&global_addr
+	);
+	if(!create_ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
+
+	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
+
+	char addr_str[NET_IPV6_ADDR_LEN];
+	net_addr_ntop(AF_INET6, &global_addr, addr_str, sizeof(addr_str));
+
+	LOG_INF("Adding global IPv6: %s", addr_str);
+}
+
+static void write_ft_sink_settings(void)
+{
+	// Read settings
+	struct dect_settings dev_settings = {0};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	// Write prefix string to prefix struct
 	net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
 
-	struct dect_settings cp_dev_settings = dev_settings;
+	// Device type and long rd id
+	dev_settings.device_type = current_device_type;
+	dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
 
-	cp_dev_settings.device_type = current_device_type;
-	cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+	// Network beacon
+	// TODO: Fix from magic numbers
+	dev_settings.nw_beacon.channel = 1657;
+	dev_settings.nw_beacon.beacon_period = DECT_NW_BEACON_PERIOD_1000MS;
 
-	if(current_device_type & DECT_DEVICE_TYPE_FT) // Sink FT specific settings
-	{
-		cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID; // Only change long rd id if this is sink
+	// Write bitmap
+	dev_settings.cmd_params.write_scope_bitmap = 
+		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE 	|
+		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES 	|
+		DECT_SETTINGS_WRITE_SCOPE_NW_BEACON;
 
-		cp_dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
-	}
-	else // FTPT/PT specific settings
-	{
-		cp_dev_settings.cluster.max_beacon_tx_power_dbm = 23;
-		cp_dev_settings.cluster.max_cluster_power_dbm = 23;
-		cp_dev_settings.cluster.beacon_period = DECT_CLUSTER_BEACON_PERIOD_500MS;
-		cp_dev_settings.cluster.max_num_neighbors = 10;
-		cp_dev_settings.cluster.neighbor_inactivity_disconnect_timer_ms = 0;
-		cp_dev_settings.cluster.channel_loaded_percent = 75;
-
-		cp_dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_CLUSTER;
-	}
-
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
+	// Write settings
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
 	if (ret)
 	{
 		LOG_ERR("Failed to write settings: %d", ret);
 		return;
 	}
 
-	LOG_INF("DECT settings read and set");
+	LOG_INF("DECT sink FT settings successfully set");
 }
 
-static void construct_and_add_global_addr(void)
+static void write_ftpt_settings(void)
 {
-	// TODO: Maybe mutex on dev_settings
-	net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	// Read settings
+	struct dect_settings dev_settings = {0};
 
-	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
-	struct in6_addr global_addr;
-	bool ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-		mesh_prefix,
-		DECT_SINK_LONG_RD_ID,
-		this_rd_id,
-		&global_addr
-	);
-	if(!ok)
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
 	{
-		LOG_ERR("Failed to create IPv6 address");
+		LOG_ERR("Failed to read settings: %d", ret);
 		return;
 	}
 
-	char addr_str[NET_IPV6_ADDR_LEN];
-	net_addr_ntop(AF_INET6, &global_addr, addr_str, sizeof(addr_str));
-	LOG_INF("Adding global IPv6: %s", addr_str);
+	// Write prefix string to prefix struct
+	net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
 
-	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
+	// Device type
+	dev_settings.identities.transmitter_long_rd_id = current_device_type;
 
+	// Cluster beacon
+	// TODO: Fix from magic numbers
 }
 
-static void start_cluster(void)
+static void run_as_ft_sink(void)
+{
+	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Created
+	if (ret == -EALREADY)
+	{
+		LOG_ERR("Network already created: %d", ret);
+	}
+	else if (ret)
+	{
+		LOG_ERR("Network create failed: %d", ret);
+	}
+}
+
+static void start_nw_beacon(void)
+{
+	// Create global IPv6 out of long RD ID
+	create_global_ipv6();
+
+	// TODO: Currently hardcoded. Change this to dynamic channel
+	struct dect_nw_beacon_start_req_params nw_beacon_params = {
+		.channel = 1657,
+		.additional_ch_count = 0,
+	};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params)); // Callback to NET_EVENT_DECT_NW_BEACON_START_RESULT
+	if (ret)
+	{
+		LOG_ERR("Network beacon start failed: %d", ret);
+	}
+}
+
+static void run_as_ftpt(void)
+{
+	// Create global IPv6 address out of long RD ID
+	create_global_ipv6();
+
+	// Join network
+	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
+	if (ret)
+	{
+		LOG_ERR("Network joined failed: %d", ret);
+	}
+}
+
+static void start_ftpt_cluster(void)
 {
 	struct dect_cluster_start_req_params cluster_params = 
 	{
 		.channel = DECT_CLUSTER_CHANNEL_ANY,
 	};
 
-	int ret = net_mgmt(NET_REQUEST_DECT_CLUSTER_START, dect_iface, &cluster_params, sizeof(cluster_params));
+	int ret = net_mgmt(NET_REQUEST_DECT_CLUSTER_START, dect_iface, &cluster_params, sizeof(cluster_params)); // Callback to NET_EVENT_DECT_CLUSTER_CREATED_RESULT
 	if (ret)
 	{
-		LOG_ERR("Cluster start failed: %d", ret);
-		return;
+		LOG_ERR("Cluster failed: %d", ret);
 	}
-
-	LOG_INF("Cluster start request successfull");
 }
 
 int main(void)
@@ -679,9 +739,6 @@ int main(void)
 
 	/* --- Independent setup and initialization ---*/
 
-	// Set hostname based on device type
-	main_mac_set_hostname();
-
 	// Setup network management callbacks for L4 connected/disconnected events
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
 				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
@@ -689,18 +746,14 @@ int main(void)
 
 	// Setup callback for modem activation event
 	net_mgmt_init_event_callback(&net_activate_cb, net_activate_handler,
-		NET_EVENT_DECT_ACTIVATE_DONE);
+		NET_EVENT_DECT_ACTIVATE_DONE			|
+		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
+		NET_EVENT_DECT_CLUSTER_CREATED_RESULT);
 	net_mgmt_add_event_callback(&net_activate_cb);
 
 	// Setup callbacks for other DECT stuff 
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    	NET_EVENT_DECT_SCAN_RESULT      	|
-    	NET_EVENT_DECT_RSSI_SCAN_RESULT 	|
-    	NET_EVENT_DECT_SCAN_DONE			|
-		NET_EVENT_DECT_NEIGHBOR_LIST		|
-		NET_EVENT_DECT_ASSOCIATION_CHANGED	|
-		NET_EVENT_DECT_NETWORK_STATUS		|
-		NET_EVENT_DECT_NW_BEACON_START_RESULT);
+    	NET_EVENT_DECT_NETWORK_STATUS);
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
@@ -729,7 +782,14 @@ int main(void)
 	LOG_INF("Wait for DECT stack to activate...");
 	k_sem_take(&dect_activate_sem, K_FOREVER);
 
-	read_and_write_settings();
+	if (is_sink)
+	{
+		write_ft_sink_settings();
+	}
+	else
+	{
+		write_ftpt_settings();
+	}
 
 #if defined(CONFIG_DK_LIBRARY)
 	/* Initialize DK library for buttons and LEDs */
@@ -766,8 +826,35 @@ int main(void)
 
 	/* --- Sink FT and regular FTPT specific --- */
 
+	// SINK:
+	// 1. Network start
+	// 2. Network beacon start
+	// 3. Cluster start
+	// 4. Cluster beacon start
+	// 5. Start Rx thread
+
+	// FTPT:
+	// 1. Network scan and join
+	// 2. Cluster start
+	// 3. Cluster beacon start
+	// 4. Start Tx messages every 30 seconds
+
+	if (current_device_type & DECT_DEVICE_TYPE_FT && is_sink) // FT sink
+	{
+		run_as_ft_sink();
+	}
+	else if (current_device_type & DECT_DEVICE_TYPE_FT && !is_sink) // FTPT
+	{
+		run_as_ftpt();
+	}
+	else // Other combination
+	{
+		LOG_ERR("Unhandled device type combination");
+	}
+
+	/*
 	// Sink FT
-	if (current_device_type == DECT_DEVICE_TYPE_FT)
+	if (is_sink)
 	{
 		// What autoconnect does:
 		// 1. Network scan
@@ -795,8 +882,8 @@ int main(void)
 		// Main application loop - run UDP receive in main thread
 		main_mac_rx_thread();
 	}
-	// Regular FTPT (FTs and PTs)
-	else if (current_device_type == DECT_DEVICE_TYPE_PT)
+	// Regular FTPT
+	else if(current_device_type & DECT_DEVICE_TYPE_FT)
 	{
 		// What autoconnect does:
 		// 1. Network scan
@@ -833,8 +920,9 @@ int main(void)
 	}
 	else
 	{
-		LOG_ERR("Invalid device type: 0x%08x", current_device_type);
+		LOG_ERR("Invalid device type combination");
 	}
+	*/
 
 	while(1)
 		k_sleep(K_SECONDS(1));
