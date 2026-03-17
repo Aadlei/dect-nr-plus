@@ -34,7 +34,7 @@
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
-const static bool is_sink = true;
+const static bool is_sink = false;
 static char *mesh_prefix_str = "fd12:3456:789a::";
 static uint16_t common_port = 12345;
 static struct in6_addr mesh_prefix;
@@ -671,6 +671,20 @@ static void write_ftpt_settings(void)
 
 	// Cluster beacon
 	// TODO: Fix from magic numbers
+
+	// Write bitmap
+	dev_settings.cmd_params.write_scope_bitmap = 
+		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+
+	// Write settings
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to write settings: %d", ret);
+		return;
+	}
+
+	LOG_INF("DECT FTPT settings successfully set");
 }
 
 static void run_as_ft_sink(void)
