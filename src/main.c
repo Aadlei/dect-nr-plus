@@ -35,6 +35,7 @@
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 static char *mesh_prefix_str = "fd12:3456:789a::";
+static uint16_t common_port = 12345;
 static struct in6_addr mesh_prefix;
 #define DECT_SINK_LONG_RD_ID 0x67214200U
 
@@ -267,34 +268,70 @@ static void main_mac_tx_demo_message(void)
 	int sock, ret;
 	char message[512];
 
+	// Read long RD ID to put in message
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+	}
+
+	uint32_t long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
 	snprintf(message, sizeof(message),
-		"Hello DECT NR+ from device %d! Message #%u",
-		CONFIG_DECT_TRANSMITTER_ID, ++message_counter);
+		"Hello DECT NR+ from 0x%08x! Counter #%u",
+		long_rd_id, ++message_counter);
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0) {
+	if (sock < 0)
+	{
 		LOG_ERR("Failed to create socket: %d", errno);
 		return;
 	}
 
-	/* Fallback to multicast */
-	struct sockaddr_in6 mcast_addr = {0};
+	// Find IPv6 address of sink
+	// 64-bit prefix + 32-bit sink long rd id + 32-bit long rd id of device (same as sink)
+	struct sockaddr_in6 sock_addr = 
+	{
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(common_port)
+	};
 
-	mcast_addr.sin6_family = AF_INET6;
-	mcast_addr.sin6_port = htons(12345);
-
-	/* Well known IPv6 link local scope all nodes multicast address (FF02::1) */
-	net_ipv6_addr_create_ll_allnodes_mcast((struct in6_addr *)&mcast_addr.sin6_addr);
-
-	LOG_INF("Sending to multicast (peer not resolved)");
+	bool ok;
+	if (message_counter % 2 == 0)
+	{
+		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		0x12345678,
+		&sock_addr.sin6_addr
+	);
+	}
+	else
+	{
+		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		DECT_SINK_LONG_RD_ID,
+		&sock_addr.sin6_addr
+	);
+	}
+	
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
 
 	ret = sendto(sock, message, strlen(message), 0,
-				(struct sockaddr *)&mcast_addr, sizeof(mcast_addr));
+				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
 	
 
-	if (ret < 0) {
+	if (ret < 0)
+	{
 		LOG_ERR("Failed to send message: %d", errno);
-	} else {
+	}
+	else
+	{
 		LOG_INF("Sent: %s", message);
 
 #if defined(CONFIG_DK_LIBRARY)
@@ -318,7 +355,6 @@ static void main_mac_print_network_info(struct net_if *iface)
 
 static int main_mac_start_udp_listener(void)
 {
-	struct sockaddr_in6 addr = {0};
 	struct timeval timeout = {
 		.tv_sec = SOCKET_RECV_TIMEOUT_SEC,
 		.tv_usec = 0
@@ -326,36 +362,42 @@ static int main_mac_start_udp_listener(void)
 	int ret;
 	int sock;
 
-	if (atomic_get(&recv_socket_atomic) >= 0) {
-		return 0;  /* Already listening */
+	if (atomic_get(&recv_socket_atomic) >= 0)
+	{
+		return 0;  // Already listening
 	}
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0) {
+	if (sock < 0)
+	{
 		LOG_ERR("Failed to create receive socket: %d", errno);
 		return -errno;
 	}
 
-	/* Set receive timeout to avoid blocking forever */
+	// Set receive timeout to avoid blocking forever
 	ret = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-	if (ret < 0) {
+	if (ret < 0)
+	{
 		LOG_WRN("Failed to set socket receive timeout: %d", errno);
-		/* Continue anyway - socket will block indefinitely */
+		// Continue anyway - socket will block indefinitely
 	}
 
-	addr.sin6_family = AF_INET6;
-	addr.sin6_port = htons(12345);
-	addr.sin6_addr = in6addr_any;
+	struct sockaddr_in6 recv_addr = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(common_port),
+		.sin6_addr = in6addr_any
+	};
 
-	ret = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
-	if (ret < 0) {
+	ret = bind(sock, (struct sockaddr *)&recv_addr, sizeof(recv_addr));
+	if (ret < 0)
+	{
 		LOG_ERR("Failed to bind receive socket: %d", errno);
 		close(sock);
 		return -errno;
 	}
 
 	atomic_set(&recv_socket_atomic, sock);
-	LOG_INF("UDP listener started on port 12345 (timeout: %ds)", SOCKET_RECV_TIMEOUT_SEC);
+	LOG_INF("UDP listener started on port %d (timeout: %ds)", common_port, SOCKET_RECV_TIMEOUT_SEC);
 	return 0;
 }
 
@@ -379,9 +421,11 @@ static void main_mac_rx_thread(void)
 	int sock;
 	char addr_str[NET_IPV6_ADDR_LEN];
 
-	while (1) {
+	while (1)
+	{
 		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0) {
+		if (sock < 0)
+		{
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
@@ -390,22 +434,26 @@ static void main_mac_rx_thread(void)
 		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
 			       (struct sockaddr *)&src_addr, &addr_len);
 
-		if (ret < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Timeout - check if socket is still valid and continue */
+		if (ret < 0)
+		{
+			// Timeout - check if socket is still valid and continue
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
 				continue;
-			}
-			/* Check if socket was closed by another thread */
-			if (atomic_get(&recv_socket_atomic) < 0) {
+			
+			// Check if socket was closed by another thread
+			if (atomic_get(&recv_socket_atomic) < 0)
+			{
 				LOG_DBG("Socket closed, waiting for reconnect");
 				continue;
 			}
+
 			LOG_ERR("recvfrom failed: %d", errno);
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
 
-		if (ret > 0) {
+		if (ret > 0)
+		{
 			buffer[ret] = '\0';
 			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
 				      addr_str, sizeof(addr_str));
@@ -445,7 +493,8 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		main_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		//k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
+		if (current_device_type & DECT_DEVICE_TYPE_PT)
+			k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
 
 #if defined(CONFIG_DK_LIBRARY)
 		/* Turn on LED 1 to indicate connection */
@@ -538,29 +587,28 @@ static void read_and_write_settings(void)
 	if (ret)
 	{
 		LOG_ERR("Failed to read settings: %d", ret);
+		return;
 	}
-	else
+
+	// Also set rd id and prefix fields
+	net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
+
+	struct dect_settings cp_dev_settings = dev_settings;
+
+	if(current_device_type & DECT_DEVICE_TYPE_FT) // Only change long rd id if this is sink
+		cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	
+	cp_dev_settings.device_type = current_device_type;
+	cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE | DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
+
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
+	if (ret)
 	{
-		// Also set rd id and prefix fields
-		net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
-
-		struct dect_settings cp_dev_settings = dev_settings;
-
-		if(current_device_type & DECT_DEVICE_TYPE_FT) // Only change long rd id if this is sink
-			cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
-		
-		cp_dev_settings.device_type = current_device_type;
-		cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE | DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
-
-		ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
-		if (ret)
-		{
-			LOG_ERR("Failed to write settings: %d", ret);
-			return;
-		}
-
-		LOG_INF("DECT settings read and set");
+		LOG_ERR("Failed to write settings: %d", ret);
+		return;
 	}
+
+	LOG_INF("DECT settings read and set");
 }
 
 static void construct_and_add_global_addr(void)
@@ -711,6 +759,9 @@ int main(void)
 		// Block until network created and beacon transmitted
 		LOG_INF("Blocking until network created");
 		k_sem_take(&dect_network_created_sem, K_FOREVER);
+
+		// Main application loop - run UDP receive in main thread
+		main_mac_rx_thread();
 	}
 	// Regular FTPT (FTs and PTs)
 	else if (current_device_type == DECT_DEVICE_TYPE_PT)
@@ -749,9 +800,6 @@ int main(void)
 	{
 		LOG_ERR("Invalid device type: 0x%08x", current_device_type);
 	}
-
-	/* Main application loop - run UDP receive in main thread */
-	// main_mac_rx_thread();
 
 	while(1)
 		k_sleep(K_SECONDS(1));
