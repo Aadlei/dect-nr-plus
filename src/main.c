@@ -595,11 +595,26 @@ static void read_and_write_settings(void)
 
 	struct dect_settings cp_dev_settings = dev_settings;
 
-	if(current_device_type & DECT_DEVICE_TYPE_FT) // Only change long rd id if this is sink
-		cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
-	
 	cp_dev_settings.device_type = current_device_type;
-	cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE | DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
+	cp_dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+
+	if(current_device_type & DECT_DEVICE_TYPE_FT) // Sink FT specific settings
+	{
+		cp_dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID; // Only change long rd id if this is sink
+
+		cp_dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
+	}
+	else // FTPT/PT specific settings
+	{
+		cp_dev_settings.cluster.max_beacon_tx_power_dbm = 23;
+		cp_dev_settings.cluster.max_cluster_power_dbm = 23;
+		cp_dev_settings.cluster.beacon_period = DECT_CLUSTER_BEACON_PERIOD_500MS;
+		cp_dev_settings.cluster.max_num_neighbors = 10;
+		cp_dev_settings.cluster.neighbor_inactivity_disconnect_timer_ms = 0;
+		cp_dev_settings.cluster.channel_loaded_percent = 75;
+
+		cp_dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_CLUSTER;
+	}
 
 	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &cp_dev_settings, sizeof(cp_dev_settings));
 	if (ret)
@@ -637,6 +652,23 @@ static void construct_and_add_global_addr(void)
 
 	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
 
+}
+
+static void start_cluster(void)
+{
+	struct dect_cluster_start_req_params cluster_params = 
+	{
+		.channel = DECT_CLUSTER_CHANNEL_ANY,
+	};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_CLUSTER_START, dect_iface, &cluster_params, sizeof(cluster_params));
+	if (ret)
+	{
+		LOG_ERR("Cluster start failed: %d", ret);
+		return;
+	}
+
+	LOG_INF("Cluster start request successfull");
 }
 
 int main(void)
@@ -795,6 +827,9 @@ int main(void)
 		{
 			LOG_ERR("Failed to perform DECT scan: %d", err);
 		}
+
+		// Start own cluster
+		start_cluster();
 	}
 	else
 	{
