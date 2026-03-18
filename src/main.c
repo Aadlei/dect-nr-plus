@@ -48,6 +48,8 @@ static void run_as_ftpt(void);
 static void start_ftpt_cluster(void);
 
 static void create_global_ipv6(void);
+static void write_ft_sink_settings(void);
+static void write_ftpt_settings(void);
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -160,6 +162,21 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 			LOG_INF("Cluster created");
 			break;
 
+		case NET_EVENT_DECT_NW_BEACON_START_RESULT:
+			const struct dect_common_resp_evt *res = cb->info;
+
+			if (res->status == DECT_STATUS_OK)
+			{
+				LOG_INF("Network beacon successfully created and running");
+				k_sem_give(&dect_network_created_sem);
+			}
+			else
+			{
+				LOG_ERR("Network beacon failed: 0x%08x", res->status);
+			}
+
+			break;
+
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
@@ -240,21 +257,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		{
 			peer_addr_known = false;
 			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
-		}
-
-		break;
-
-	case NET_EVENT_DECT_NW_BEACON_START_RESULT:
-		const struct dect_common_resp_evt *res = cb->info;
-
-		if (res->status == DECT_STATUS_OK)
-		{
-			LOG_INF("Network beacon successfully created and running");
-			k_sem_give(&dect_network_created_sem);
-		}
-		else
-		{
-			LOG_ERR("Network beacon failed: 0x%08x", res->status);
 		}
 
 		break;
@@ -487,10 +489,10 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 				 uint64_t mgmt_event, struct net_if *iface)
 {
 	/* Only handle events for our DECT interface */
-	if (iface != dect_iface) {
-		return;
-	}
-	if (mgmt_event == NET_EVENT_IF_UP) {
+	if (iface != dect_iface) return;
+
+	if (mgmt_event == NET_EVENT_IF_UP)
+	{
 		LOG_INF("DECT NR+ interface is UP with local IPv6 addressing");
 		dect_connected = true;
 		main_mac_print_network_info(iface);
@@ -499,7 +501,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		main_mac_start_udp_listener();
 
 		/* Start demo work and schedule peer resolution */
-		if (is_sink)
+		if (!is_sink)
 			k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
 
 #if defined(CONFIG_DK_LIBRARY)
@@ -511,6 +513,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		LOG_INF("DECT NR+ interface is DOWN");
 		dect_connected = false;
 		peer_addr_known = false;
+		nw_beacon_started = false;
 		/* Reset message counter for new session */
 		message_counter = 0;
 		main_mac_stop_udp_listener();
@@ -667,7 +670,7 @@ static void write_ftpt_settings(void)
 	net_addr_pton(AF_INET6, mesh_prefix_str, &mesh_prefix);
 
 	// Device type
-	dev_settings.identities.transmitter_long_rd_id = current_device_type;
+	dev_settings.device_type = current_device_type;
 
 	// Cluster beacon
 	// TODO: Fix from magic numbers
@@ -760,15 +763,14 @@ int main(void)
 
 	// Setup callback for modem activation event
 	net_mgmt_init_event_callback(&net_activate_cb, net_activate_handler,
-		NET_EVENT_DECT_ACTIVATE_DONE			|
-		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
-		NET_EVENT_DECT_CLUSTER_CREATED_RESULT);
+		NET_EVENT_DECT_ACTIVATE_DONE);
 	net_mgmt_add_event_callback(&net_activate_cb);
 
-	// Setup callbacks for other DECT stuff 
+	// DECT event callbacks
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    	NET_EVENT_DECT_NETWORK_STATUS);
-	net_mgmt_add_event_callback(&dect_event_cb);
+		NET_EVENT_DECT_NETWORK_STATUS			|
+		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
+		NET_EVENT_DECT_CLUSTER_CREATED_RESULT);
 
 	net_mgmt_init_event_callback(&net_if_cb,
 				     net_if_event_handler,
@@ -824,17 +826,6 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
-// Todo: Swap this with manual stuff, because we dont know what is going on here
-/*#if !defined(CONFIG_NET_L2_DECT_CONN_MGR_AUTO_CONNECT)
-	// Initiate connection using connection manager
-	LOG_INF("Initiating DECT connection...");
-	err = conn_mgr_if_connect(dect_iface);
-	if (err) {
-		LOG_ERR("Failed to initiate connection: %d", err);
-		return err;
-	}
-#endif
-*/
 	LOG_INF("Hello DECT application started successfully");
 
 
@@ -865,78 +856,6 @@ int main(void)
 	{
 		LOG_ERR("Unhandled device type combination");
 	}
-
-	/*
-	// Sink FT
-	if (is_sink)
-	{
-		// What autoconnect does:
-		// 1. Network scan
-		// 2. RSSI scan
-		// 3. Starting cluster on best channel
-		// 4. Cluster configured
-		// 5. Network created
-
-		// Manual stuff:
-		// 1. RSSI scan
-		// 2. Create network
-		// 3. Network beacon
-		// 4. Create cluster
-		// 5. Cluster beacon
-
-		// RSSI scan
-		
-		// Create network and beacon
-		net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0);
-		
-		// Block until network created and beacon transmitted
-		LOG_INF("Blocking until network created");
-		k_sem_take(&dect_network_created_sem, K_FOREVER);
-
-		// Main application loop - run UDP receive in main thread
-		main_mac_rx_thread();
-	}
-	// Regular FTPT
-	else if(current_device_type & DECT_DEVICE_TYPE_FT)
-	{
-		// What autoconnect does:
-		// 1. Network scan
-		// 2. Trigger association
-
-		// Manual stuff:
-		LOG_INF("Initiating DECT connection...");	
-		err = conn_mgr_if_connect(dect_iface);
-		if (err) {
-			LOG_ERR("Failed to initiate connection: %d", err);
-			return err;
-		}
-
-		// Block until connection established
-		LOG_INF("Blocking until network joined");
-		k_sem_take(&dect_network_joined_sem, K_FOREVER);
-
-		struct dect_scan_params scan_params = 
-		{
-			.band = 0,
-			.channel_count = 1,
-			.channel_list = { 1657 },
-			.channel_scan_time_ms = 500,
-		};
-
-		err = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params));
-		if (err)
-		{
-			LOG_ERR("Failed to perform DECT scan: %d", err);
-		}
-
-		// Start own cluster
-		start_cluster();
-	}
-	else
-	{
-		LOG_ERR("Invalid device type combination");
-	}
-	*/
 
 	while(1)
 		k_sleep(K_SECONDS(1));
