@@ -35,11 +35,14 @@
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 const static bool is_sink = false;
-static char *mesh_prefix_str = "fd12:3456:789a::";
-static uint16_t common_port = 12345;
+
+const static char *mesh_prefix_str = "fd12:3456:789a::";
+const static uint16_t common_port = 12345;
 static struct in6_addr mesh_prefix;
 #define DECT_SINK_LONG_RD_ID 0x67214200U
 static bool nw_beacon_started = false;
+static uint32_t best_long_rd_id = 0;
+static uint8_t best_route_cost = 0xFF;
 
 static void run_as_ft_sink(void);
 static void start_nw_beacon(void);
@@ -50,6 +53,8 @@ static void start_ftpt_cluster(void);
 static void create_global_ipv6(void);
 static void write_ft_sink_settings(void);
 static void write_ftpt_settings(void);
+static void start_network_scan(void);
+static void join_network(uint32_t long_rd_id);
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -91,6 +96,7 @@ static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
 
 // Semaphor for right order of events in main
 K_SEM_DEFINE(dect_activate_sem, 0, 1);
+K_SEM_DEFINE(dect_deactivate_sem, 0, 1);
 K_SEM_DEFINE(dect_network_created_sem, 0, 1); // For sink
 K_SEM_DEFINE(dect_network_joined_sem, 0, 1); // For else
 
@@ -124,69 +130,81 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 {
     switch (event)
 	{
-		case NET_EVENT_DECT_NETWORK_STATUS:
-			const struct dect_network_status_evt *status = cb->info;
+	case NET_EVENT_DECT_NETWORK_STATUS:
+		const struct dect_network_status_evt *status = cb->info;
 
-			if (status->network_status == DECT_NETWORK_STATUS_CREATED)
+		if (status->network_status == DECT_NETWORK_STATUS_CREATED)
+		{
+			LOG_INF("Network created");
+			if (!nw_beacon_started)
 			{
-				LOG_INF("Network created");
-				if (!nw_beacon_started)
-				{
-					nw_beacon_started = true;
-					start_nw_beacon();
-				}
+				nw_beacon_started = true;
+				start_nw_beacon();
 			}
-			else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
-			{
-				LOG_INF("Network joined. Safe to start own cluster");
-				start_ftpt_cluster();
-				k_sem_give(&dect_network_joined_sem);
-			}
-			else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
-			{
-				LOG_INF("Network unjoined");
-			}
-			else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
-			{
-				LOG_ERR("Network failure");
-			}
-			else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
-			{
-				LOG_ERR("Network removed");
-			}
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+		{
+			LOG_INF("Network joined. Safe to start own cluster");
+			start_ftpt_cluster();
+			k_sem_give(&dect_network_joined_sem);
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
+		{
+			LOG_INF("Network unjoined");
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
+		{
+			LOG_ERR("Network failure");
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
+		{
+			LOG_ERR("Network removed");
+		}
 
-			// TODO: Code here if network is quit or something
-			break;
+		// TODO: Code here if network is quit or something
+		break;
 
-		case NET_EVENT_DECT_CLUSTER_CREATED_RESULT:
-			LOG_INF("Cluster created");
-			break;
+	case NET_EVENT_DECT_CLUSTER_CREATED_RESULT:
+		LOG_INF("Cluster created");
+		break;
 
-		case NET_EVENT_DECT_NW_BEACON_START_RESULT:
-			const struct dect_common_resp_evt *res = cb->info;
+	case NET_EVENT_DECT_NW_BEACON_START_RESULT:
+		const struct dect_common_resp_evt *res = cb->info;
 
-			if (res->status == DECT_STATUS_OK)
-			{
-				LOG_INF("Network beacon successfully created and running");
-				k_sem_give(&dect_network_created_sem);
-			}
-			else
-			{
-				LOG_ERR("Network beacon failed: 0x%08x", res->status);
-			}
+		if (res->status == DECT_STATUS_OK)
+		{
+			LOG_INF("Network beacon successfully created and running");
+			k_sem_give(&dect_network_created_sem);
+		}
+		else
+		{
+			LOG_ERR("Network beacon failed: 0x%08x", res->status);
+		}
 
-			break;
+		break;
 
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
 
-        LOG_INF("Found FT: long_rd_id=0x%08x, has_route_info=%s sink_long_rd_id=0x%08x channel=%u, rssi=%d",
-                result->transmitter_long_rd_id,
-				result->has_route_info ? "true" : "false",
-				sink_result->sink_address,
-                result->channel,
-				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
+		// TODO: When route cost is included, make decision here
+		best_long_rd_id = result->transmitter_long_rd_id;
+		best_route_cost = sink_result->route_cost;
+
+        break;
+
+	case NET_EVENT_DECT_SCAN_DONE:
+		if (best_long_rd_id != 0)
+		{
+			LOG_INF("Scan done. Found RD (long_rd_id=0x%08x) network to join...", best_long_rd_id);
+			join_network(best_long_rd_id);
+		}
+		else
+		{
+			LOG_WRN("No sink FT found. Retrying...");
+			k_msleep(2000);
+			start_network_scan();
+		}
         break;
 
     case NET_EVENT_DECT_RSSI_SCAN_RESULT:
@@ -195,10 +213,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
 				data->channel,
 				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
-        break;
-
-    case NET_EVENT_DECT_SCAN_DONE:
-        LOG_INF("Scan complete");
         break;
 
 	case NET_EVENT_DECT_NEIGHBOR_LIST:
@@ -532,13 +546,13 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 	int ret;
 
 	if (has_changed & button_states & DK_BTN1_MSK) {
-		LOG_INF("Button 1 pressed - initiating connection");
+		/*LOG_INF("Button 1 pressed - initiating connection");
 		ret = conn_mgr_if_connect(dect_iface);
 		if (ret < 0) {
 			LOG_ERR("Failed to initiate connection: %d", ret);
 		} else {
 			LOG_INF("Connection initiated");
-		}
+		}*/
 	}
 
 	if (has_changed & button_states & DK_BTN2_MSK) {
@@ -557,9 +571,7 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 				 uint64_t event, struct net_if *iface)
 {
 	// Only handle events for our DECT interface
-	if (iface != dect_iface) {
-		return;
-	}
+	if (iface != dect_iface) return;
 	
 	if (event == NET_EVENT_DECT_ACTIVATE_DONE)
 	{
@@ -567,12 +579,26 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 
 		if(*status == DECT_STATUS_OK)
 		{
-			LOG_INF("DECT stack activated successfully.");
+			LOG_INF("DECT stack activated successfully");
 			k_sem_give(&dect_activate_sem);
 		}
 		else
 		{
 			LOG_ERR("DECT stack activation failed: %d", *status);
+		}
+	}
+	else if (event == NET_EVENT_DECT_DEACTIVATE_DONE)
+	{
+		const enum dect_status_values *status = cb->info;
+
+		if(*status == DECT_STATUS_OK)
+		{
+			LOG_INF("DECT stack deactivated successfully");
+			k_sem_give(&dect_deactivate_sem);
+		}
+		else
+		{
+			LOG_ERR("DECT stack deactivation failed: %d", *status);
 		}
 	}
 }
@@ -673,6 +699,7 @@ static void write_ftpt_settings(void)
 	dev_settings.device_type = current_device_type;
 
 	// Cluster beacon
+
 	// TODO: Fix from magic numbers
 
 	// Write bitmap
@@ -726,11 +753,55 @@ static void run_as_ftpt(void)
 	// Create global IPv6 address out of long RD ID
 	create_global_ipv6();
 
+	start_network_scan();
+}
+
+static void join_network(uint32_t long_rd_id)
+{
+	// Write long rd id to settings
+	struct dect_settings dev_settings = {0};
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	dev_settings.network_join.target_ft_long_rd_id = best_long_rd_id;
+	dev_settings.cmd_params.write_scope_bitmap = DECT_SETTINGS_WRITE_SCOPE_NETWORK_JOIN;
+
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_INF("Failed to write settings: %d", ret);
+		return;
+	}
+
 	// Join network
-	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
+	ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
 	if (ret)
 	{
 		LOG_ERR("Network joined failed: %d", ret);
+	}
+}
+
+static void start_network_scan(void)
+{
+	best_long_rd_id = 0;
+	best_route_cost = 0xFF;
+
+	struct dect_scan_params scan_params = 
+	{
+		.band = 1,
+		.channel_count = 0,
+		// Maybe add list here
+		.channel_scan_time_ms = 500,
+	};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params)); // Callback to NET_EVENT_DECT_SCAN_RESULT and NET_EVENT_DECT_SCAN_DONE
+	if (ret)
+	{
+		LOG_ERR("Failed to start network scan: %d", ret);
 	}
 }
 
@@ -763,14 +834,18 @@ int main(void)
 
 	// Setup callback for modem activation event
 	net_mgmt_init_event_callback(&net_activate_cb, net_activate_handler,
-		NET_EVENT_DECT_ACTIVATE_DONE);
+		NET_EVENT_DECT_ACTIVATE_DONE			|
+		NET_EVENT_DECT_DEACTIVATE_DONE);
 	net_mgmt_add_event_callback(&net_activate_cb);
 
 	// DECT event callbacks
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
 		NET_EVENT_DECT_NETWORK_STATUS			|
+		NET_EVENT_DECT_SCAN_RESULT				|
+		NET_EVENT_DECT_SCAN_DONE				|
 		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
 		NET_EVENT_DECT_CLUSTER_CREATED_RESULT);
+	net_mgmt_add_event_callback(&dect_event_cb);
 
 	net_mgmt_init_event_callback(&net_if_cb,
 				     net_if_event_handler,
@@ -783,28 +858,6 @@ int main(void)
 	if (!dect_iface) {
 		LOG_ERR("No DECT interface found");
 		return -ENODEV;
-	}
-
-	// Initialize modem library and this triggers DECT NR+ stack initialization
-#if defined(CONFIG_NRF_MODEM_LIB)
-	err = nrf_modem_lib_init();
-	if (err) {
-		LOG_ERR("Failed to initialize modem library: %d", err);
-		return err;
-	}
-#endif
-
-	// Block until DECT is activated
-	LOG_INF("Wait for DECT stack to activate...");
-	k_sem_take(&dect_activate_sem, K_FOREVER);
-
-	if (is_sink)
-	{
-		write_ft_sink_settings();
-	}
-	else
-	{
-		write_ftpt_settings();
 	}
 
 #if defined(CONFIG_DK_LIBRARY)
@@ -825,6 +878,42 @@ int main(void)
 
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
+
+	// Initialize modem library and this triggers DECT NR+ stack initialization
+#if defined(CONFIG_NRF_MODEM_LIB)
+	err = nrf_modem_lib_init();
+	if (err) {
+		LOG_ERR("Failed to initialize modem library: %d", err);
+		return err;
+	}
+#endif
+
+	// Block until DECT is activated
+	LOG_INF("Wait for DECT stack to activate...");
+	k_sem_take(&dect_activate_sem, K_FOREVER);
+
+	err = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
+	if (err)
+	{
+		LOG_ERR("Failed to deactivate DECT stack: %d", err);
+	}
+
+	// Block until deactivated
+	LOG_INF("Wait for DECT stack to deactivate...");
+	k_sem_take(&dect_deactivate_sem, K_FOREVER);
+
+	// Write settings
+	if (is_sink) write_ft_sink_settings();
+	else write_ftpt_settings();
+
+	// Activate stack again
+	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+	if (err)
+	{
+		LOG_ERR("Failed to activate DECT stack: %d", err);
+	}
+
+	k_sem_take(&dect_activate_sem, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
 
