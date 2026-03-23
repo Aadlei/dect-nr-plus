@@ -33,7 +33,7 @@
 #include <net/dect/dect_utils.h>
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 const static bool is_sink = false;
 
 const static char *mesh_prefix_str = "fd12:3456:789a::";
@@ -49,6 +49,8 @@ static void start_nw_beacon(void);
 
 static void run_as_ftpt(void);
 static void start_ftpt_cluster(void);
+
+static void run_as_pt(void);
 
 static void create_global_ipv6(void);
 static void write_ft_sink_settings(void);
@@ -145,8 +147,10 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
-			start_ftpt_cluster();
 			k_sem_give(&dect_network_joined_sem);
+
+			if (current_device_type & DECT_DEVICE_TYPE_FT)
+				start_ftpt_cluster();
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
@@ -514,10 +518,6 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		/* Start UDP listener */
 		main_mac_start_udp_listener();
 
-		/* Start demo work and schedule peer resolution */
-		if (!is_sink)
-			k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
-
 #if defined(CONFIG_DK_LIBRARY)
 		/* Turn on LED 1 to indicate connection */
 		dk_set_led_on(DK_LED1);
@@ -698,10 +698,6 @@ static void write_ftpt_settings(void)
 	// Device type
 	dev_settings.device_type = current_device_type;
 
-	// Cluster beacon
-
-	// TODO: Fix from magic numbers
-
 	// Write bitmap
 	dev_settings.cmd_params.write_scope_bitmap = 
 		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
@@ -714,7 +710,7 @@ static void write_ftpt_settings(void)
 		return;
 	}
 
-	LOG_INF("DECT FTPT settings successfully set");
+	LOG_INF("DECT (FT)PT settings successfully set");
 }
 
 static void run_as_ft_sink(void)
@@ -728,6 +724,11 @@ static void run_as_ft_sink(void)
 	{
 		LOG_ERR("Network create failed: %d", ret);
 	}
+
+	LOG_INF("Blocking until network created...");
+	k_sem_take(&dect_network_created_sem, K_FOREVER);
+
+	main_mac_rx_thread();
 }
 
 static void start_nw_beacon(void)
@@ -817,6 +818,18 @@ static void start_ftpt_cluster(void)
 	{
 		LOG_ERR("Cluster failed: %d", ret);
 	}
+}
+
+static void run_as_pt(void)
+{
+	create_global_ipv6();
+
+	start_network_scan();
+
+	LOG_INF("Blocking until network joined...");
+	k_sem_take(&dect_network_joined_sem, K_FOREVER);
+
+	k_work_schedule(&tx_work, K_SECONDS(5)); // Run first after 5 seconds
 }
 
 int main(void)
@@ -933,13 +946,17 @@ int main(void)
 	// 3. Cluster beacon start
 	// 4. Start Tx messages every 30 seconds
 
-	if (current_device_type & DECT_DEVICE_TYPE_FT && is_sink) // FT sink
+	if (is_sink && current_device_type & DECT_DEVICE_TYPE_FT) // FT sink
 	{
 		run_as_ft_sink();
 	}
-	else if (current_device_type & DECT_DEVICE_TYPE_FT && !is_sink) // FTPT
+	else if (current_device_type & DECT_DEVICE_TYPE_FT) // FTPT (FT not sink)
 	{
 		run_as_ftpt();
+	}
+	else if (current_device_type & DECT_DEVICE_TYPE_PT && !is_sink)
+	{
+		run_as_pt();
 	}
 	else // Other combination
 	{
