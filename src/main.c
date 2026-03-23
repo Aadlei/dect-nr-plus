@@ -34,7 +34,7 @@
 
 // CHANGE THIS BASED ON TYPE OF DEVICE: DECT_DEVICE_TYPE_FT for sink FT; DECT_DEVICE_TYPE_PT for FTPT
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
-const static bool is_sink = false;
+const static bool is_relay = true;
 
 const static char *mesh_prefix_str = "fd12:3456:789a::";
 const static uint16_t common_port = 12345;
@@ -149,7 +149,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 			LOG_INF("Network joined. Safe to start own cluster");
 			k_sem_give(&dect_network_joined_sem);
 
-			if (current_device_type & DECT_DEVICE_TYPE_FT)
+			if (current_device_type & DECT_DEVICE_TYPE_PT)
 				start_ftpt_cluster();
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
@@ -715,6 +715,8 @@ static void write_ftpt_settings(void)
 
 static void run_as_ft_sink(void)
 {
+	LOG_WRN("Starting as FT");
+
 	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Created
 	if (ret == -EALREADY)
 	{
@@ -751,6 +753,8 @@ static void start_nw_beacon(void)
 
 static void run_as_ftpt(void)
 {
+	LOG_WRN("Starting as FTPT");
+
 	// Create global IPv6 address out of long RD ID
 	create_global_ipv6();
 
@@ -822,6 +826,8 @@ static void start_ftpt_cluster(void)
 
 static void run_as_pt(void)
 {
+	LOG_WRN("Starting as PT");
+
 	create_global_ipv6();
 
 	start_network_scan();
@@ -916,8 +922,8 @@ int main(void)
 	k_sem_take(&dect_deactivate_sem, K_FOREVER);
 
 	// Write settings
-	if (is_sink) write_ft_sink_settings();
-	else write_ftpt_settings();
+	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_sink_settings();
+	else if(current_device_type & DECT_DEVICE_TYPE_PT & is_relay) write_ftpt_settings();
 
 	// Activate stack again
 	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
@@ -946,15 +952,15 @@ int main(void)
 	// 3. Cluster beacon start
 	// 4. Start Tx messages every 30 seconds
 
-	if (is_sink && current_device_type & DECT_DEVICE_TYPE_FT) // FT sink
+	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT (sink)
 	{
 		run_as_ft_sink();
 	}
-	else if (current_device_type & DECT_DEVICE_TYPE_FT) // FTPT (FT not sink)
+	else if (is_relay && current_device_type & DECT_DEVICE_TYPE_PT) // FTPT (relay)
 	{
 		run_as_ftpt();
 	}
-	else if (current_device_type & DECT_DEVICE_TYPE_PT && !is_sink)
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT (edge)
 	{
 		run_as_pt();
 	}
