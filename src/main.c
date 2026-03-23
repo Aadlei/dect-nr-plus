@@ -44,16 +44,15 @@ static bool nw_beacon_started = false;
 static uint32_t best_long_rd_id = 0;
 static uint8_t best_route_cost = 0xFF;
 
-static void run_as_ft_sink(void);
+static void run_as_ft(void);
 static void start_nw_beacon(void);
 
 static void run_as_ftpt(void);
-static void start_ftpt_cluster(void);
 
 static void run_as_pt(void);
 
 static void create_global_ipv6(void);
-static void write_ft_sink_settings(void);
+static void write_ft_settings(void);
 static void write_ftpt_settings(void);
 static void start_network_scan(void);
 static void join_network(uint32_t long_rd_id);
@@ -148,9 +147,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
 			k_sem_give(&dect_network_joined_sem);
-
-			if (current_device_type & DECT_DEVICE_TYPE_PT)
-				start_ftpt_cluster();
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
@@ -639,7 +635,7 @@ static void create_global_ipv6(void)
 	LOG_INF("Adding global IPv6: %s", addr_str);
 }
 
-static void write_ft_sink_settings(void)
+static void write_ft_settings(void)
 {
 	// Read settings
 	struct dect_settings dev_settings = {0};
@@ -713,7 +709,7 @@ static void write_ftpt_settings(void)
 	LOG_INF("DECT (FT)PT settings successfully set");
 }
 
-static void run_as_ft_sink(void)
+static void run_as_ft(void)
 {
 	LOG_WRN("Starting as FT");
 
@@ -759,6 +755,60 @@ static void run_as_ftpt(void)
 	create_global_ipv6();
 
 	start_network_scan();
+
+	// Deactivate stack
+	LOG_INF("Blocking until network joined...");
+	k_sem_take(&dect_network_joined_sem, K_FOREVER);
+
+	int ret = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
+	if (ret)
+	{
+		LOG_ERR("Failed to deactivate DECT: %d", ret);
+		return;
+	}
+
+	LOG_INF("Blocking until DECT deactivated...");
+	k_sem_take(&dect_deactivate_sem, K_FOREVER);
+
+	// Read settings
+	struct dect_settings dev_settings = {0};
+	net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+
+	// Write settings
+	dev_settings.device_type = DECT_DEVICE_TYPE_FT;
+	dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to write settings: %d", ret);
+		return;
+	}
+
+	// Activate stack
+	ret = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+    if (ret) {
+        LOG_ERR("Failed to activate DECT: %d", ret);
+        return;
+    }
+    k_sem_take(&dect_activate_sem, K_FOREVER);
+
+	// Start own cluster
+	struct dect_cluster_start_req_params scan_params = 
+	{
+		.channel = DECT_CLUSTER_CHANNEL_ANY,
+	};
+
+	LOG_INF("Attempt to start own cluster...");
+	ret = net_mgmt(NET_REQUEST_DECT_CLUSTER_START, dect_iface, &scan_params, sizeof(scan_params));
+	if (ret)
+	{
+		LOG_ERR("Failed to start own cluster: %d", ret);
+		return;
+	}
+	LOG_INF("Cluster successfully started!");
+
+	// TODO: Continue with these experiments
 }
 
 static void join_network(uint32_t long_rd_id)
@@ -807,20 +857,6 @@ static void start_network_scan(void)
 	if (ret)
 	{
 		LOG_ERR("Failed to start network scan: %d", ret);
-	}
-}
-
-static void start_ftpt_cluster(void)
-{
-	struct dect_cluster_start_req_params cluster_params = 
-	{
-		.channel = DECT_CLUSTER_CHANNEL_ANY,
-	};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_CLUSTER_START, dect_iface, &cluster_params, sizeof(cluster_params)); // Callback to NET_EVENT_DECT_CLUSTER_CREATED_RESULT
-	if (ret)
-	{
-		LOG_ERR("Cluster failed: %d", ret);
 	}
 }
 
@@ -922,7 +958,7 @@ int main(void)
 	k_sem_take(&dect_deactivate_sem, K_FOREVER);
 
 	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_sink_settings();
+	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
 	else if(current_device_type & DECT_DEVICE_TYPE_PT & is_relay) write_ftpt_settings();
 
 	// Activate stack again
@@ -954,7 +990,7 @@ int main(void)
 
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT (sink)
 	{
-		run_as_ft_sink();
+		run_as_ft();
 	}
 	else if (is_relay && current_device_type & DECT_DEVICE_TYPE_PT) // FTPT (relay)
 	{
