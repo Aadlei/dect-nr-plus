@@ -223,6 +223,7 @@ static void main_mac_tx_demo_message(void)
 		return;
 	}
 
+	// Timestamp with SO_TIMESTAMP
 	ret = sendto(sock, message, strlen(message), 0,
 				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
 	
@@ -898,3 +899,8 @@ int main(void)
 
 	return 0;
 }
+
+// Todo:
+// 1. Proper timestamp at Tx and Rx
+// 2. Tx and Rx both for FT and PT
+// 3. Own operation for NTP-like protocol before regular data transmission
