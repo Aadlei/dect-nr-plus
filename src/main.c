@@ -15,6 +15,7 @@
 #include <zephyr/net/conn_mgr_connectivity.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/dns_resolve.h>
+#include <zephyr/net/net_pkt.h>
 #include <zephyr/net/hostname.h>
 #include <zephyr/posix/netdb.h>
 #include <zephyr/posix/unistd.h>
@@ -37,8 +38,16 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
+struct synchronization_packet
+{
+	uint32_t time_1;
+	uint32_t time_2;
+	uint32_t time_3;
+	uint32_t time_4;
+};
+
 // CHANGE THIS BASED ON DEVICE TYPE
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
 #define DECT_SINK_LONG_RD_ID 		0x67214200U
 #define COMMON_PORT 				12345
@@ -60,10 +69,11 @@ static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
 // Semaphores for controlling flow
-K_SEM_DEFINE(dect_activate_sem, 0, 1);
-K_SEM_DEFINE(dect_deactivate_sem, 0, 1);
-K_SEM_DEFINE(dect_network_created_sem, 0, 1); // For FT
-K_SEM_DEFINE(dect_network_joined_sem, 0, 1); // For PT
+K_SEM_DEFINE(sem_activate, 0, 1);
+K_SEM_DEFINE(sem_deactivate, 0, 1);
+K_SEM_DEFINE(sem_network_created, 0, 1); // For FT
+K_SEM_DEFINE(sem_network_joined, 0, 1); // For PT
+K_SEM_DEFINE(sem_association_created, 0, 1);
 
 // Network management callback 
 static struct net_mgmt_event_callback net_conn_mgr_cb;
@@ -83,9 +93,12 @@ static int main_mac_start_udp_listener(void);
 static void main_mac_stop_udp_listener(void);
 static void main_mac_rx_thread(void);
 
+static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
 static void create_global_ipv6(void);
 static void write_ft_settings(void);
 static void write_pt_settings(void);
+
+static void synchronization_tx_rx(void);
 
 static void start_nw_beacon(void);
 static void start_network_scan(void);
@@ -199,22 +212,12 @@ static void main_mac_tx_demo_message(void)
 	if (message_counter % 2 == 0) // TODO: Remember to remove this. Only for debug
 	{
 		// Wrong destination address
-		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-			mesh_prefix,
-			DECT_SINK_LONG_RD_ID,
-			0x12345678,
-			&sock_addr.sin6_addr
-		);
+		ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, 0x12345678);
 	}
 	else
 	{
 		// Sink address
-		ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-			mesh_prefix,
-			DECT_SINK_LONG_RD_ID,
-			DECT_SINK_LONG_RD_ID,
-			&sock_addr.sin6_addr
-		);
+		ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
 	}
 	
 	if(!ok)
@@ -359,6 +362,64 @@ static void main_mac_rx_thread(void)
 	}
 }
 
+static void synchronization_tx_rx(void)
+{
+	// For PT:
+	// Get parent association info --> long RD ID --> Create IPv6
+	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T1)
+	// 2. Wait for Rx...
+	// 3. At Rx --> Timestamp (T4)
+	if (current_device_type & DECT_DEVICE_TYPE_PT)
+	{
+		struct dect_status_info dev_info = {0};
+		int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
+		if (ret)
+		{
+			LOG_ERR("Failed to get DECT status info: %d", ret);
+			return;
+		}
+
+		uint32_t parent_long_rd_id = dev_info.parent_associations->long_rd_id;
+		struct net_in6_addr parent_ipv6 = {0};
+		create_ipv6_from_long_rd_id(&parent_ipv6, parent_long_rd_id);
+
+		struct synchronization_packet tx_packet = {0};
+
+		// Todo: Take timestamps
+	}
+	else if (current_device_type & DECT_DEVICE_TYPE_FT)
+	{
+
+	}
+	else
+	{
+		LOG_ERR("Error: Wrong device type: %d", current_device_type);
+		return;
+	}
+
+	// For FT:
+	// Get first child association --> Long RD ID --> Create IPv6
+	// 1. Wait for Rx...
+	// 2. At Rx --> Timestamp (T2)
+	// 3. Timestamp 1 --> sendto(FT) --> Timestamp 2 (Average: T3)
+}
+
+static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
+{
+	bool create_ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		long_rd_id,
+		address
+	);
+	if(!create_ok)
+	{
+		LOG_ERR("Faied to create IPv6 address");
+	}
+
+	return create_ok;
+}
+
 static void create_global_ipv6(void)
 {
 	// Read settings
@@ -378,15 +439,9 @@ static void create_global_ipv6(void)
 	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
 
 	struct in6_addr global_addr;
-	bool create_ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-		mesh_prefix,
-		DECT_SINK_LONG_RD_ID,
-		this_rd_id,
-		&global_addr
-	);
-	if(!create_ok)
+	if (!create_ipv6_from_long_rd_id(&global_addr, this_rd_id))
 	{
-		LOG_ERR("Failed to create IPv6 address");
+		LOG_ERR("Failed to create global IPv6");
 		return;
 	}
 
@@ -547,7 +602,12 @@ static void run_as_ft(void)
 	}
 
 	LOG_INF("Blocking until network created...");
-	k_sem_take(&dect_network_created_sem, K_FOREVER);
+	k_sem_take(&sem_network_created, K_FOREVER);
+
+	LOG_INF("Blocking until association created...");
+	k_sem_take(&sem_association_created, K_FOREVER);
+
+	// Synchronize operation
 
 	main_mac_rx_thread();
 }
@@ -561,7 +621,12 @@ static void run_as_pt(void)
 	start_network_scan();
 
 	LOG_INF("Blocking until network joined...");
-	k_sem_take(&dect_network_joined_sem, K_FOREVER);
+	k_sem_take(&sem_network_joined, K_FOREVER);
+
+	LOG_INF("Blocking until association created...");
+	k_sem_take(&sem_association_created, K_FOREVER);
+
+	// Synchronize operation
 
 	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
 }
@@ -629,7 +694,7 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 		if(*status == DECT_STATUS_OK)
 		{
 			LOG_INF("DECT stack activated successfully");
-			k_sem_give(&dect_activate_sem);
+			k_sem_give(&sem_activate);
 		}
 		else
 		{
@@ -643,7 +708,7 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 		if(*status == DECT_STATUS_OK)
 		{
 			LOG_INF("DECT stack deactivated successfully");
-			k_sem_give(&dect_deactivate_sem);
+			k_sem_give(&sem_deactivate);
 		}
 		else
 		{
@@ -672,7 +737,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
-			k_sem_give(&dect_network_joined_sem);
+			k_sem_give(&sem_network_joined);
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
@@ -699,7 +764,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		if (res->status == DECT_STATUS_OK)
 		{
 			LOG_INF("Network beacon successfully created and running");
-			k_sem_give(&dect_network_created_sem);
+			k_sem_give(&sem_network_created);
 		}
 		else
 		{
@@ -757,6 +822,8 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		if(evt->association_change_type == DECT_ASSOCIATION_CREATED)
 		{
+			k_sem_give(&sem_association_created);
+
 			LOG_INF("Association created with RD 0x%08x (role: %s)",
                     evt->long_rd_id,
                     evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
@@ -806,7 +873,8 @@ int main(void)
 		NET_EVENT_DECT_SCAN_RESULT				|
 		NET_EVENT_DECT_SCAN_DONE				|
 		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
-		NET_EVENT_DECT_CLUSTER_CREATED_RESULT);
+		NET_EVENT_DECT_CLUSTER_CREATED_RESULT	|
+		NET_EVENT_DECT_ASSOCIATION_CHANGED);
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	// Get the DECT network interface 
@@ -846,7 +914,7 @@ int main(void)
 
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate...");
-	k_sem_take(&dect_activate_sem, K_FOREVER);
+	k_sem_take(&sem_activate, K_FOREVER);
 
 	err = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
 	if (err)
@@ -856,7 +924,7 @@ int main(void)
 
 	// Block until deactivated
 	LOG_INF("Wait for DECT stack to deactivate...");
-	k_sem_take(&dect_deactivate_sem, K_FOREVER);
+	k_sem_take(&sem_deactivate, K_FOREVER);
 
 	// Write settings
 	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
@@ -869,13 +937,13 @@ int main(void)
 		LOG_ERR("Failed to activate DECT stack: %d", err);
 	}
 
-	k_sem_take(&dect_activate_sem, K_FOREVER);
+	k_sem_take(&sem_activate, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
 
 	/* --- Sink FT and regular PT specific --- */
 
-	// SINK:
+	// FT:
 	// 1. Network start
 	// 2. Network beacon start
 	// 3. Cluster start
