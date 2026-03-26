@@ -38,12 +38,9 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
-struct synchronization_packet
+struct SYNC_packet
 {
-	uint32_t time_1;
-	uint32_t time_2;
-	uint32_t time_3;
-	uint32_t time_4;
+	uint32_t T[4];
 };
 
 // CHANGE THIS BASED ON DEVICE TYPE
@@ -69,6 +66,7 @@ static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 
 // Semaphores for controlling flow
+K_SEM_DEFINE(sem_if_up, 0, 1);
 K_SEM_DEFINE(sem_activate, 0, 1);
 K_SEM_DEFINE(sem_deactivate, 0, 1);
 K_SEM_DEFINE(sem_network_created, 0, 1); // For FT
@@ -364,13 +362,19 @@ static void main_mac_rx_thread(void)
 
 static void synchronization_tx_rx(void)
 {
+	struct SYNC_packet SYNC_tx_packet = {0};
+	struct SYNC_packet SYNC_rx_packet;
+
 	// For PT:
 	// Get parent association info --> long RD ID --> Create IPv6
-	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T1)
+	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T0)
 	// 2. Wait for Rx...
-	// 3. At Rx --> Timestamp (T4)
+	// 3. At Rx --> Timestamp (T3)
 	if (current_device_type & DECT_DEVICE_TYPE_PT)
 	{
+		uint32_t T0;
+		uint32_t T3;
+
 		struct dect_status_info dev_info = {0};
 		int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
 		if (ret)
@@ -383,9 +387,102 @@ static void synchronization_tx_rx(void)
 		struct net_in6_addr parent_ipv6 = {0};
 		create_ipv6_from_long_rd_id(&parent_ipv6, parent_long_rd_id);
 
-		struct synchronization_packet tx_packet = {0};
+		// Setup socket and UDP Tx
+		int sock, ret;
 
-		// Todo: Take timestamps
+		sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+		if (sock < 0)
+		{
+			LOG_ERR("Failed to create socket: %d", errno);
+			return;
+		}
+
+		struct sockaddr_in6 sock_addr = 
+		{
+			.sin6_family = AF_INET6,
+			.sin6_port = htons(COMMON_PORT)
+		};
+
+		// Timestamp and Tx
+		uint32_t T0_before = k_uptime_get_32();
+		ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
+					(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+		uint32_t T0_after = k_uptime_get_32();
+
+		// T0
+		T0 = (T0_after + T0_before) / 2;
+
+		if (ret < 0)
+			LOG_ERR("Failed to send SYNC packet: %d", errno);
+		else
+			LOG_INF("SYNC packet sent");
+
+		close(sock);
+
+		// Wait for interface to go up and UDP listener started
+		struct sockaddr_in6 src_addr;
+		socklen_t addr_len;
+		char addr_str[NET_IPV6_ADDR_LEN];
+		
+		while (1)
+		{
+			sock = atomic_get(&recv_socket_atomic);
+			if (sock < 0)
+			{
+				k_sleep(K_SECONDS(1));
+				LOG_WRN("Failed to get socket on Rx. Retrying in 1 second...");
+				// TODO: Restart process here because it ruins the timing
+				continue;
+			}
+
+			addr_len = sizeof(src_addr);
+
+			// Timestamp and Rx
+			uint32_t T_temp_before = k_uptime_get_32();
+			ret = recvfrom(sock, &SYNC_rx_packet, sizeof(SYNC_rx_packet) - 1, 0,
+					(struct sockaddr *)&src_addr, &addr_len);
+			uint32_t T_temp_after = k_uptime_get_32();
+			uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+
+			if (ret < 0)
+			{
+				// Timeout - check if socket is still valid and continue
+				if (errno == EAGAIN || errno == EWOULDBLOCK)
+					continue;
+				
+				// Check if socket was closed by another thread
+				if (atomic_get(&recv_socket_atomic) < 0)
+				{
+					LOG_DBG("Socket closed, waiting for reconnect");
+					continue;
+				}
+
+				LOG_ERR("recvfrom failed: %d", errno);
+				k_sleep(K_SECONDS(1));
+				continue;
+			}
+
+			if (ret > 0)
+			{
+				net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
+						addr_str, sizeof(addr_str));
+				LOG_INF("Received %d bytes from %s",
+					ret, addr_str);
+
+				uint32_t rcv_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+				if (rcv_long_rd_id == parent_long_rd_id)
+				{
+					LOG_INF("Rx packet long RD ID matching. Exiting Rx...");
+					T3 = T_temp;
+					break;
+				}
+				else
+				{
+					LOG_WRN("Long RD ID not matching");
+				}
+			}
+		}
 	}
 	else if (current_device_type & DECT_DEVICE_TYPE_FT)
 	{
@@ -400,8 +497,8 @@ static void synchronization_tx_rx(void)
 	// For FT:
 	// Get first child association --> Long RD ID --> Create IPv6
 	// 1. Wait for Rx...
-	// 2. At Rx --> Timestamp (T2)
-	// 3. Timestamp 1 --> sendto(FT) --> Timestamp 2 (Average: T3)
+	// 2. At Rx --> Timestamp (T1)
+	// 3. Timestamp 1 --> sendto(FT) --> Timestamp 2 (Average: T2)
 }
 
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
@@ -665,7 +762,10 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		dk_set_led_on(DK_LED1);
 #endif
 
-	} else if (mgmt_event == NET_EVENT_IF_DOWN) {
+		k_sem_give(&sem_if_up);
+	}
+	else if (mgmt_event == NET_EVENT_IF_DOWN)
+	{
 		LOG_INF("DECT NR+ interface is DOWN");
 		dect_connected = false;
 		nw_beacon_started = false;
