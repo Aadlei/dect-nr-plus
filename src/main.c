@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-// NOTE TO SELF: If the tx_work is not scheduled and not running, REMEMBER TO CONNECT ANOTHER DEVICE AS RECEIVER
-
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
@@ -15,6 +13,7 @@
 #include <zephyr/net/conn_mgr_connectivity.h>
 #include <zephyr/net/socket.h>
 #include <zephyr/net/dns_resolve.h>
+#include <zephyr/net/net_pkt.h>
 #include <zephyr/net/hostname.h>
 #include <zephyr/posix/netdb.h>
 #include <zephyr/posix/unistd.h>
@@ -25,138 +24,103 @@
 #include <dk_buttons_and_leds.h>
 #endif
 
+#if defined(CONFIG_NRF_MODEM_LIB)
 #include <modem/nrf_modem_lib.h>
+#endif
+
 #include <nrf_modem.h>
 
 #include <net/dect/dect_net_l2_mgmt.h>
 #include <net/dect/dect_net_l2.h>
+#include <net/dect/dect_utils.h>
 
 #include "spi.h"
 #include "uart.h"
-#include <math.h>
 
-LOG_MODULE_REGISTER(hello_dect, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
+LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
-/* Modem fault handler */
-void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
-{
-	LOG_ERR("Modem fault: reason=%d, program_counter=0x%x",
-		fault_info->reason, fault_info->program_counter);
+// CHANGE THIS BASED ON DEVICE TYPE
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
-	__ASSERT(false, "Modem crash detected, halting application");
-}
+#define DECT_SINK_LONG_RD_ID 		0x67214200U
+#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
 
-/* Network interface */
+#define COMMON_PORT 				12345
+#define MESH_PREFIX_STR 			"fd12:3456:789a"
+#define NW_SCAN_RETRY_MS 			2000
+#define SOCKET_RECV_TIMEOUT_SEC 	5
+#define WORK_RESCHEDULE_TIME_SEC 10
+
+static struct in6_addr mesh_prefix;
+
+// Networ interface
 static struct net_if *dect_iface;
 
-uint16_t transmitter_id = CONFIG_DECT_TRANSMITTER_ID;
+// Application state
+static bool nw_beacon_started = false; // TODO: Fix this to more robust solution
+static uint32_t best_long_rd_id = 0;
+static uint8_t best_route_cost = 0xFF;
+static bool dect_connected;
+static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
+uint32_t message_counter;
+uint32_t current_long_rd_id;
 
-/* Network management callback */
+// Semaphores for controlling flow
+K_SEM_DEFINE(sem_if_up, 0, 1);
+K_SEM_DEFINE(sem_activate, 0, 1);
+K_SEM_DEFINE(sem_deactivate, 0, 1);
+K_SEM_DEFINE(sem_network_created, 0, 1); // For FT
+K_SEM_DEFINE(sem_network_joined, 0, 1); // For PT
+K_SEM_DEFINE(sem_association_created, 0, 1);
+
+// Network management callback 
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
+static struct net_mgmt_event_callback net_activate_cb;
 static struct net_mgmt_event_callback dect_event_cb;
+
+// Forward declarations
+#if defined(CONFIG_DK_LIBRARY)
+static void button_handler(uint32_t button_states, uint32_t has_changed);
+#endif
+
+static void main_mac_print_network_info(struct net_if *iface);
+
+static void main_tx_image_message(const uint8_t *image_data, size_t image_size);
+static int main_mac_start_udp_listener(void);
+static void main_mac_stop_udp_listener(void);
+static void main_mac_rx_thread(void);
+
+static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
+static void create_global_ipv6(void);
+static void write_ft_settings(void);
+static void write_pt_settings(void);
+
+static void start_nw_beacon(void);
+static void start_network_scan(void);
+static void join_network(uint32_t long_rd_id);
+
+static void run_as_ft(void);
+static void run_as_pt(void);
+
+// Tx work
 static void check_spi_image_work_handler(struct k_work *work);
-
-/* Application state */
-static bool dect_connected;
-static uint32_t message_counter;
-static struct sockaddr_in6 peer_addr;
-static bool peer_resolved;
-static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
-
-/* Socket receive timeout in seconds */
-#define SOCKET_RECV_TIMEOUT_SEC 5
-
-/* Device configuration based on Kconfig */
-#if defined(CONFIG_DECT_DEFAULT_DEV_TYPE_FT)
-#define DEVICE_TYPE_STR "FT"
-static char *local_hostname = "dect-nr+-ft-device";
-static char *peer_hostname = "dect-nr+-pt-device.local";
-#elif defined(CONFIG_DECT_DEFAULT_DEV_TYPE_PT)
-#define DEVICE_TYPE_STR "PT"
-static char *local_hostname = "dect-nr+-pt-device";
-static char *peer_hostname = "dect-nr+-ft-device.local";
-#else
-#error "Either CONFIG_DECT_DEFAULT_DEV_TYPE_FT or _PT must be defined."
-#endif
-
-/* Forward declarations */
-static void hello_dect_mac_resolve_peer_address(void);
-static void hello_dect_mac_set_hostname(void);
-static void hello_dect_mac_rx_thread(void);
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size);
-
-/* TX work declaration */
 static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
-
-/* LED 2 turn-off work definition */
-#if defined(CONFIG_DK_LIBRARY)
-static void hello_dect_led2_off_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(led2_off_work, hello_dect_led2_off_work_handler);
-#endif
-
-#if defined(CONFIG_DK_LIBRARY)
-static void hello_dect_led2_off_work_handler(struct k_work *work)
-{
-	/* Turn off LED 2 after 1 second delay */
-	dk_set_led_off(DK_LED2);
-}
-#endif
-
-/* Image chunk definition */
-#define MAX_PAYLOAD_SIZE 1024
-struct data_packet 
-{
-	uint16_t packet_idx;
-	uint16_t total_packets;
-	uint16_t payload_len;
-	//uint8_t payload[CHUNK_PAYLOAD_SIZE];
-	uint8_t payload[]; // Either allocate full payload size or dynamic. Find out what is best.
-};
-
-static void hello_dect_mac_resolve_peer_address(void)
-{
-	int ret;
-	struct addrinfo hints = {0};
-	struct addrinfo *result;
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	hints.ai_family = AF_INET6;
-	hints.ai_flags = AI_ADDRCONFIG;
-
-	LOG_INF("Resolving peer hostname: %s", peer_hostname);
-
-	ret = getaddrinfo(peer_hostname, NULL, &hints, &result);
-	if (ret == 0 && result != NULL) {
-		memcpy(&peer_addr, result->ai_addr, sizeof(peer_addr));
-		peer_addr.sin6_port = htons(12345);
-		peer_resolved = true;
-
-		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Peer resolved to: %s", addr_str);
-
-		freeaddrinfo(result);
-	} else {
-		LOG_WRN("Failed to resolve peer hostname (%s): %d", peer_hostname, ret);
-		peer_resolved = false;
-	}
-}
-
 static void check_spi_image_work_handler(struct k_work *work)
 {
 	// First check if dect is connected so device can transmit
 	if (!dect_connected)
 	{
-		LOG_ERR("DECT not connected! Rescheduling in 10 seconds...");
-		k_work_schedule(&tx_work, K_SECONDS(10));
+		LOG_ERR("DECT not connected! Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 		return;
 	}
 
 	// No tx if no new image is available
     if (!spi_slave_is_new_image_available())
 	{
-		LOG_WRN("No new image available. Aborting transmission.");
-		k_work_schedule(&tx_work, K_SECONDS(10));
+		LOG_WRN("No new image available. Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 		return;
 	}
 
@@ -165,282 +129,49 @@ static void check_spi_image_work_handler(struct k_work *work)
 	
 	LOG_INF("New image received: %zu bytes", image_size);
 
-	//TODO: Change to FT in future.
-	// Basically if the PI is connected to the gateway directly, just transmit it over uart.
-	if (strcmp(DEVICE_TYPE_STR, "PT") == 0)
-	{
-		struct image_metadata meta = {
-			.tx_id = transmitter_id,  // For testing purposes, we can just use the transmitter ID as the tx_id with 0 hops.
-			.hop_count = 0,
-			.seq_num = 0
-		};
+	// Transmit over DECT
+	main_tx_image_message(image_data, image_size);
 
-		int ret = uart_send_image(image_data, image_size, &meta);
-		if (ret != 0) {
-			LOG_ERR("Failed to send image via uart: %d", ret);
-		} else {
-			LOG_INF("Image forwarded to uart");
-		}
-	}
-	else if (dect_connected)
-	{
-		if (!peer_resolved)	
-			hello_dect_mac_resolve_peer_address();
-
-		hello_dect_tx_image_message(image_data, image_size);
-	}
-        
 	spi_slave_clear_image_flag();
 
 	// Reschedule work
-	k_work_schedule(&tx_work, K_SECONDS(10));
+	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 }
 
-static void hello_dect_tx_image_message(const uint8_t *image_data, size_t image_size)
-{
-	int sock;
-	int ret = -1;
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0)
-	{
-		LOG_ERR("Failed to create socket: %d", errno);
-		return;
-	}
-
-	if (peer_resolved)
-	{
-		/* Send to discovered peer */
-		net_addr_ntop(AF_INET6, &peer_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Sending to peer: %s", addr_str);
-
-		uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
-
-		for (uint16_t i=0; i < total_chunks; i++)
-		{
-			size_t offset = i * MAX_PAYLOAD_SIZE;
-			size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
-			size_t total_size = sizeof(struct data_packet) + payload_len;
-
-			struct data_packet *packet = malloc(total_size);
-			if (packet == NULL)
-			{
-				LOG_ERR("Memory allocation failed!");
-				return;
-			}
-
-			packet->packet_idx = i;
-			packet->total_packets = total_chunks;
-			packet->payload_len = payload_len;
-
-			memcpy(packet->payload, image_data + offset, packet->payload_len);
-
-			ret = sendto(sock, packet, total_size, 0,
-				(struct sockaddr *)&peer_addr, sizeof(peer_addr));
-
-			if (ret >= 0) // Success
-				LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-			else
-				LOG_ERR("Failed to send image chunk to peer: %d", ret);
-			
-			// Free the packet memory
-			free(packet);
-		}
-	}
-	// TODO: Handle multicast
-
-	if (ret <= 0)
-		LOG_ERR("Failed to send image to peer: %d", ret);
-	else
-		LOG_INF("Image sent to peer!");
-
+// LED 2 turn-off work
 #if defined(CONFIG_DK_LIBRARY)
-		/* Cancel any pending LED 2 turn-off work */
-		k_work_cancel_delayable(&led2_off_work);
-		/* Turn on LED 2 to indicate successful transmission */
-		dk_set_led_on(DK_LED2);
-		/* Schedule LED 2 to turn off after 1 second */
-		k_work_schedule(&led2_off_work, K_SECONDS(1));
+static void main_led2_off_work_handler(struct k_work *work)
+{
+	// Turn off LED 2 after 1 second delay 
+	dk_set_led_off(DK_LED2);
+}
+static K_WORK_DELAYABLE_DEFINE(led2_off_work, main_led2_off_work_handler);
 #endif
 
-	close(sock);
-}
-
-static void hello_dect_mac_print_network_info(struct net_if *iface)
+// Modem fault handler
+void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 {
-	LOG_INF("=== Network Interface Information ===");
-	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
-	LOG_INF("Device type: %s", DEVICE_TYPE_STR);
+	LOG_ERR("Modem fault: reason=%d, program_counter=0x%x",
+		fault_info->reason, fault_info->program_counter);
+
+	__ASSERT(false, "Modem crash detected, halting application");
 }
 
-static int hello_dect_mac_start_udp_listener(void)
-{
-	struct sockaddr_in6 addr = {0};
-	struct timeval timeout = {
-		.tv_sec = SOCKET_RECV_TIMEOUT_SEC,
-		.tv_usec = 0
-	};
-	int ret;
-	int sock;
-
-	if (atomic_get(&recv_socket_atomic) >= 0) {
-		return 0;  /* Already listening */
-	}
-
-	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0) {
-		LOG_ERR("Failed to create receive socket: %d", errno);
-		return -errno;
-	}
-
-	/* Set receive timeout to avoid blocking forever */
-	ret = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-	if (ret < 0) {
-		LOG_WRN("Failed to set socket receive timeout: %d", errno);
-		/* Continue anyway - socket will block indefinitely */
-	}
-
-	addr.sin6_family = AF_INET6;
-	addr.sin6_port = htons(12345);
-	addr.sin6_addr = in6addr_any;
-
-	ret = bind(sock, (struct sockaddr *)&addr, sizeof(addr));
-	if (ret < 0) {
-		LOG_ERR("Failed to bind receive socket: %d", errno);
-		close(sock);
-		return -errno;
-	}
-
-	atomic_set(&recv_socket_atomic, sock);
-	LOG_INF("UDP listener started on port 12345 (timeout: %ds)", SOCKET_RECV_TIMEOUT_SEC);
-	return 0;
-}
-
-static void hello_dect_mac_stop_udp_listener(void)
-{
-	int sock = atomic_get(&recv_socket_atomic);
-
-	if (sock >= 0) {
-		atomic_set(&recv_socket_atomic, -1);
-		close(sock);
-		LOG_INF("UDP listener stopped");
-	}
-}
-
-static void hello_dect_mac_rx_thread(void)
-{
-	char buffer[256];
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len;
-	int ret;
-	int sock;
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	while (1) {
-		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0) {
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-
-		addr_len = sizeof(src_addr);
-		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
-			       (struct sockaddr *)&src_addr, &addr_len);
-
-		if (ret < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK) {
-				/* Timeout - check if socket is still valid and continue */
-				continue;
-			}
-			/* Check if socket was closed by another thread */
-			if (atomic_get(&recv_socket_atomic) < 0) {
-				LOG_DBG("Socket closed, waiting for reconnect");
-				continue;
-			}
-			LOG_ERR("recvfrom failed: %d", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-
-		if (ret > 0) {
-			buffer[ret] = '\0';
-			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
-				      addr_str, sizeof(addr_str));
-			LOG_INF("Received %d bytes from %s: %s",
-				ret, addr_str, buffer);
-		}
-
-	}
-}
-
-static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
-				       uint64_t mgmt_event, struct net_if *iface)
-{
-	/* Only handle events for our DECT interface */
-	if (iface != dect_iface) {
-		return;
-	}
-	if (mgmt_event == NET_EVENT_L4_CONNECTED) {
-		LOG_INF("NET_EVENT_L4_CONNECTED");
-	} else if (mgmt_event == NET_EVENT_L4_DISCONNECTED) {
-		LOG_INF("NET_EVENT_L4_DISCONNECTED");
-	}
-}
-
-static void net_if_event_handler(struct net_mgmt_event_callback *cb,
-				 uint64_t mgmt_event, struct net_if *iface)
-{
-	/* Only handle events for our DECT interface */
-	if (iface != dect_iface) {
-		return;
-	}
-	if (mgmt_event == NET_EVENT_IF_UP) {
-		LOG_INF("DECT NR+ interface is UP with local IPv6 addressing");
-		dect_connected = true;
-		hello_dect_mac_print_network_info(iface);
-
-		/* Start UDP listener */
-		hello_dect_mac_start_udp_listener();
-
-		/* Start demo work and schedule peer resolution */
-		// k_work_schedule(&tx_work, K_SECONDS(5));  /* First run after 5 seconds */
-		// This is buggy. The shit doesnt start, so moved to manual schedule
-
-#if defined(CONFIG_DK_LIBRARY)
-		/* Turn on LED 1 to indicate connection */
-		dk_set_led_on(DK_LED1);
-#endif
-
-	} else if (mgmt_event == NET_EVENT_IF_DOWN) {
-		LOG_INF("DECT NR+ interface is DOWN");
-		dect_connected = false;
-		peer_resolved = false;
-		/* Reset message counter for new session */
-		message_counter = 0;
-		hello_dect_mac_stop_udp_listener();
-		k_work_cancel_delayable(&tx_work);
-
-#if defined(CONFIG_DK_LIBRARY)
-		/* Turn off LED 1 to indicate disconnection */
-		dk_set_led_off(DK_LED1);
-#endif
-	}
-}
-
+// Function declarations
 #if defined(CONFIG_DK_LIBRARY)
 static void button_handler(uint32_t button_states, uint32_t has_changed)
 {
 	int ret;
 
 	if (has_changed & button_states & DK_BTN1_MSK) {
-		LOG_INF("Button 1 pressed - initiating connection");
+		/*LOG_INF("Button 1 pressed - initiating connection");
 		ret = conn_mgr_if_connect(dect_iface);
 		if (ret < 0) {
 			LOG_ERR("Failed to initiate connection: %d", ret);
 		} else {
 			LOG_INF("Connection initiated");
-		}
+		}*/
 	}
 
 	if (has_changed & button_states & DK_BTN2_MSK) {
@@ -455,26 +186,621 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 }
 #endif
 
-static void hello_dect_mac_set_hostname(void)
+static void main_mac_print_network_info(struct net_if *iface)
 {
-	if (net_hostname_set(local_hostname, strlen(local_hostname))) {
-		LOG_ERR("Failed to set hostname %s", local_hostname);
-	} else {
-		LOG_INF("Hostname set to: %s", local_hostname);
+	LOG_INF("=== Network Interface Information ===");
+	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
+}
+
+static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
+{
+	int sock;
+	int ret = -1;
+
+	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0)
+	{
+		LOG_ERR("Failed to create socket: %d", errno);
+		return;
+	}
+
+	// Find IPv6 address of sink
+	// 64-bit prefix + 32-bit sink long rd id + 32-bit long rd id of device (same as sink)
+	struct sockaddr_in6 sock_addr = 
+	{
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(COMMON_PORT),
+	};
+
+	// Sink address
+	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
+
+		// Send to sink address
+	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
+
+	for (uint16_t i=0; i < total_chunks; i++)
+	{
+		size_t offset = i * MAX_PAYLOAD_SIZE;
+		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+		size_t total_size = sizeof(struct data_packet) + payload_len;
+
+		struct data_packet *packet = malloc(total_size);
+		if (packet == NULL)
+		{
+			LOG_ERR("Memory allocation failed!");
+			return;
+		}
+
+		packet->packet_idx = i;
+		packet->total_packets = total_chunks;
+		packet->payload_len = payload_len;
+
+		memcpy(packet->payload, image_data + offset, packet->payload_len);
+
+		ret = sendto(sock, packet, total_size, 0,
+			(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+
+		if (ret >= 0) // Success
+			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
+		else
+			LOG_ERR("Failed to send image chunk to FT: %d", ret);
+		
+		// Free the packet memory
+		free(packet);
+	}
+	
+	if (ret <= 0)
+		LOG_ERR("Failed to send image to FT: %d", ret);
+	else
+		LOG_INF("Image sent to FT!");
+
+#if defined(CONFIG_DK_LIBRARY)
+		// Cancel any pending LED 2 turn-off work 
+		k_work_cancel_delayable(&led2_off_work);
+		// Turn on LED 2 to indicate successful transmission 
+		dk_set_led_on(DK_LED2);
+		// Schedule LED 2 to turn off after 1 second 
+		k_work_schedule(&led2_off_work, K_SECONDS(1));
+#endif
+
+	close(sock);
+}
+
+static int main_mac_start_udp_listener(void)
+{
+	struct timeval timeout = {
+		.tv_sec = SOCKET_RECV_TIMEOUT_SEC,
+		.tv_usec = 0
+	};
+	int ret;
+	int sock;
+
+	if (atomic_get(&recv_socket_atomic) >= 0)
+	{
+		return 0;  // Already listening
+	}
+
+	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0)
+	{
+		LOG_ERR("Failed to create receive socket: %d", errno);
+		return -errno;
+	}
+
+	// Set receive timeout to avoid blocking forever
+	ret = setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+	if (ret < 0)
+	{
+		LOG_WRN("Failed to set socket receive timeout: %d", errno);
+		// Continue anyway - socket will block indefinitely
+	}
+
+	struct sockaddr_in6 recv_addr = {
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(COMMON_PORT),
+		.sin6_addr = in6addr_any
+	};
+
+	ret = bind(sock, (struct sockaddr *)&recv_addr, sizeof(recv_addr));
+	if (ret < 0)
+	{
+		LOG_ERR("Failed to bind receive socket: %d", errno);
+		close(sock);
+		return -errno;
+	}
+
+	atomic_set(&recv_socket_atomic, sock);
+	LOG_INF("UDP listener started on port %d (timeout: %ds)", COMMON_PORT, SOCKET_RECV_TIMEOUT_SEC);
+	return 0;
+}
+
+static void main_mac_stop_udp_listener(void)
+{
+	int sock = atomic_get(&recv_socket_atomic);
+
+	if (sock >= 0) {
+		atomic_set(&recv_socket_atomic, -1);
+		close(sock);
+		LOG_INF("UDP listener stopped");
+	}
+}
+
+static void main_mac_rx_thread(void)
+{
+    struct sockaddr_in6 src_addr;
+    socklen_t addr_len;
+    int ret;
+    int sock;
+
+    while (true) // Main thread ends here in infinite loop
+	{
+        sock = atomic_get(&recv_socket_atomic);
+        if (sock < 0)
+		{
+            k_sleep(K_SECONDS(1)); 
+            continue;
+        }
+
+        struct rx_chunk *chunk = uart_get_free_chunk();
+
+        addr_len = sizeof(src_addr);
+        ret = recvfrom(sock, chunk->data, CHUNK_BUF_SIZE, 0,
+                   (struct sockaddr *)&src_addr, &addr_len);
+
+        if (ret < 0)
+		{
+            uart_return_free_chunk(chunk);
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            
+            if (atomic_get(&recv_socket_atomic) < 0)
+                continue;
+            
+            LOG_ERR("recvfrom failed: %d", errno);
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
+
+        if (ret < (int)sizeof(struct data_packet))
+		{
+            LOG_WRN("Packet too small: %d bytes", ret);
+            uart_return_free_chunk(chunk);
+            continue;
+        }
+
+        struct data_packet *pkt = (struct data_packet *)chunk->data;
+        LOG_INF("Chunk %d/%d (%d bytes)",
+            pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
+
+        chunk->data_len = ret;
+        uart_queue_chunk(chunk);
+    }
+}
+
+static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
+{
+	bool create_ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
+		mesh_prefix,
+		DECT_SINK_LONG_RD_ID,
+		long_rd_id,
+		address
+	);
+	if(!create_ok)
+	{
+		LOG_ERR("Faied to create IPv6 address");
+	}
+
+	return create_ok;
+}
+
+static void create_global_ipv6(void)
+{
+	// Read settings
+	struct dect_settings dev_settings = {0};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	// Write prefix string to prefix struct
+	net_addr_pton(AF_INET6, MESH_PREFIX_STR, &mesh_prefix);
+
+	// Construct global IPv6 address
+	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
+	struct in6_addr global_addr;
+	if (!create_ipv6_from_long_rd_id(&global_addr, this_rd_id))
+	{
+		LOG_ERR("Failed to create global IPv6");
+		return;
+	}
+
+	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
+
+	char addr_str[NET_IPV6_ADDR_LEN];
+	net_addr_ntop(AF_INET6, &global_addr, addr_str, sizeof(addr_str));
+
+	LOG_INF("Adding global IPv6: %s", addr_str);
+}
+
+static void write_ft_settings(void)
+{
+	// Read settings
+	struct dect_settings dev_settings = {0};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	// Device type and long rd id
+	dev_settings.device_type = current_device_type;
+	dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+
+	// Network beacon
+	// TODO: Fix from magic numbers
+	dev_settings.nw_beacon.channel = 1657;
+	dev_settings.nw_beacon.beacon_period = DECT_NW_BEACON_PERIOD_1000MS;
+
+	// Write bitmap
+	dev_settings.cmd_params.write_scope_bitmap = 
+		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE 	|
+		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES 	|
+		DECT_SETTINGS_WRITE_SCOPE_NW_BEACON;
+
+	// Write settings
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to write settings: %d", ret);
+		return;
+	}
+
+	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
+	LOG_INF("DECT sink FT settings successfully set");
+}
+
+static void write_pt_settings(void)
+{
+	// Read settings
+	struct dect_settings dev_settings = {0};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	// Device type and long RD ID
+	dev_settings.device_type = current_device_type;
+	dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+
+	// Write bitmap
+	dev_settings.cmd_params.write_scope_bitmap = 
+		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE	|
+		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
+
+	// Write settings
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to write settings: %d", ret);
+		return;
+	}
+
+	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
+	LOG_INF("DECT PT settings successfully set");
+}
+
+static void start_nw_beacon(void)
+{
+	// TODO: Currently hardcoded. Change this to dynamic channel
+	struct dect_nw_beacon_start_req_params nw_beacon_params = {
+		.channel = 1657,
+		.additional_ch_count = 0,
+	};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params)); // Callback to NET_EVENT_DECT_NW_BEACON_START_RESULT
+	if (ret)
+	{
+		LOG_ERR("Network beacon start failed: %d", ret);
+	}
+}
+
+static void start_network_scan(void)
+{
+	best_long_rd_id = 0;
+	best_route_cost = 0xFF;
+
+	struct dect_scan_params scan_params = 
+	{
+		.band = 1,
+		.channel_count = 0,
+		// Maybe add list here
+		.channel_scan_time_ms = 500,
+	};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params)); // Callback to NET_EVENT_DECT_SCAN_RESULT and NET_EVENT_DECT_SCAN_DONE
+	if (ret)
+	{
+		LOG_ERR("Failed to start network scan: %d", ret);
+	}
+}
+
+static void join_network(uint32_t long_rd_id)
+{
+	// Write long rd id to settings
+	struct dect_settings dev_settings = {0};
+	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_ERR("Failed to read settings: %d", ret);
+		return;
+	}
+
+	dev_settings.network_join.target_ft_long_rd_id = best_long_rd_id;
+	dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_NETWORK_JOIN;
+
+	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
+	if (ret)
+	{
+		LOG_INF("Failed to write settings: %d", ret);
+		return;
+	}
+
+	// Join network
+	ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
+	if (ret)
+	{
+		LOG_ERR("Network joined failed: %d", ret);
+	}
+}
+
+static void run_as_ft(void)
+{
+	LOG_WRN("Starting as FT");
+
+	create_global_ipv6();
+
+	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Created
+	if (ret == -EALREADY)
+	{
+		LOG_ERR("Network already created: %d", ret);
+	}
+	else if (ret)
+	{
+		LOG_ERR("Network create failed: %d", ret);
+	}
+
+	LOG_INF("Blocking until network created...");
+	k_sem_take(&sem_network_created, K_FOREVER);
+
+	LOG_INF("Blocking until association created...");
+	k_sem_take(&sem_association_created, K_FOREVER);
+
+	ret = uart_data_init();
+	if (ret)
+	{
+		LOG_ERR("Failed to initialize UART: %d", ret);
+		return;
+	}
+
+	uart_tx_thread_start();
+	main_mac_rx_thread();
+}
+
+static void run_as_pt(void)
+{
+	LOG_WRN("Starting as PT");
+
+	create_global_ipv6();
+
+	start_network_scan();
+
+	LOG_INF("Blocking until network joined...");
+	k_sem_take(&sem_network_joined, K_FOREVER);
+
+	LOG_INF("Blocking until association created...");
+	k_sem_take(&sem_association_created, K_FOREVER);
+
+	// SPI slave start
+	int ret = spi_slave_init();
+	if (ret)
+	{
+		LOG_ERR("Failed to initialize SPI slave: %d", ret);
+		return;
+	}
+	ret = spi_slave_start_thread();
+	if (ret)
+	{
+		LOG_ERR("Failed to start SPI slave thread: %d", ret);
+		return;
+	}
+
+	spi_slave_start_thread();
+	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
+}
+
+static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
+				       uint64_t mgmt_event, struct net_if *iface)
+{
+	// Only handle events for our DECT interface 
+	if (iface != dect_iface) {
+		return;
+	}
+	if (mgmt_event == NET_EVENT_L4_CONNECTED) {
+		LOG_INF("NET_EVENT_L4_CONNECTED");
+	} else if (mgmt_event == NET_EVENT_L4_DISCONNECTED) {
+		LOG_INF("NET_EVENT_L4_DISCONNECTED");
+	}
+}
+
+static void net_if_event_handler(struct net_mgmt_event_callback *cb,
+				 uint64_t mgmt_event, struct net_if *iface)
+{
+	// Only handle events for our DECT interface 
+	if (iface != dect_iface) return;
+
+	if (mgmt_event == NET_EVENT_IF_UP)
+	{
+		LOG_INF("DECT NR+ interface is UP with local IPv6 addressing");
+		dect_connected = true;
+		main_mac_print_network_info(iface);
+
+		// Start UDP listener 
+		main_mac_start_udp_listener();
+
+#if defined(CONFIG_DK_LIBRARY)
+		// Turn on LED 1 to indicate connection 
+		dk_set_led_on(DK_LED1);
+#endif
+
+		k_sem_give(&sem_if_up);
+	}
+	else if (mgmt_event == NET_EVENT_IF_DOWN)
+	{
+		LOG_INF("DECT NR+ interface is DOWN");
+		dect_connected = false;
+		nw_beacon_started = false;
+		// Reset message counter for new session 
+		message_counter = 0;
+		main_mac_stop_udp_listener();
+		k_work_cancel_delayable(&tx_work);
+
+#if defined(CONFIG_DK_LIBRARY)
+		// Turn off LED 1 to indicate disconnection 
+		dk_set_led_off(DK_LED1);
+#endif
+	}
+}
+
+static void net_activate_handler(struct net_mgmt_event_callback *cb,
+				 uint64_t event, struct net_if *iface)
+{
+	// Only handle events for our DECT interface
+	if (iface != dect_iface) return;
+	
+	if (event == NET_EVENT_DECT_ACTIVATE_DONE)
+	{
+		const enum dect_status_values *status = cb->info;
+
+		if(*status == DECT_STATUS_OK)
+		{
+			LOG_INF("DECT stack activated successfully");
+			k_sem_give(&sem_activate);
+		}
+		else
+		{
+			LOG_ERR("DECT stack activation failed: %d", *status);
+		}
+	}
+	else if (event == NET_EVENT_DECT_DEACTIVATE_DONE)
+	{
+		const enum dect_status_values *status = cb->info;
+
+		if(*status == DECT_STATUS_OK)
+		{
+			LOG_INF("DECT stack deactivated successfully");
+			k_sem_give(&sem_deactivate);
+		}
+		else
+		{
+			LOG_ERR("DECT stack deactivation failed: %d", *status);
+		}
 	}
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
                                uint64_t event, struct net_if *iface)
 {
-    switch (event) {
+    switch (event)
+	{
+	case NET_EVENT_DECT_NETWORK_STATUS:
+		const struct dect_network_status_evt *status = cb->info;
+
+		if (status->network_status == DECT_NETWORK_STATUS_CREATED)
+		{
+			LOG_INF("Network created");
+			if (!nw_beacon_started)
+			{
+				nw_beacon_started = true;
+				start_nw_beacon();
+			}
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
+		{
+			LOG_INF("Network joined. Safe to start own cluster");
+			k_sem_give(&sem_network_joined);
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
+		{
+			LOG_INF("Network unjoined");
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
+		{
+			LOG_ERR("Network failure");
+		}
+		else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
+		{
+			LOG_ERR("Network removed");
+		}
+
+		break;
+
+	case NET_EVENT_DECT_CLUSTER_CREATED_RESULT:
+		LOG_INF("Cluster created");
+		break;
+
+	case NET_EVENT_DECT_NW_BEACON_START_RESULT:
+		const struct dect_common_resp_evt *res = cb->info;
+
+		if (res->status == DECT_STATUS_OK)
+		{
+			LOG_INF("Network beacon successfully created and running");
+			k_sem_give(&sem_network_created);
+		}
+		else
+		{
+			LOG_ERR("Network beacon failed: 0x%08x", res->status);
+		}
+
+		break;
+
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
+		const struct dect_route_info *sink_result = &result->route_info;
 
-        LOG_INF("Found FT: long_rd_id=%u, channel=%u, rssi=%d",
-                result->transmitter_long_rd_id,
-                result->channel,
-				result->rx_signal_info.rssi_2);  // Just log the first subslot verdict for simplicity
+		// TODO: When route cost is included, make decision here
+		best_long_rd_id = result->transmitter_long_rd_id;
+		best_route_cost = sink_result->route_cost;
+
+        break;
+
+	case NET_EVENT_DECT_SCAN_DONE:
+		if (best_long_rd_id != 0)
+		{
+			LOG_INF("Scan done. Found RD (long_rd_id=0x%08x) network to join...", best_long_rd_id);
+			join_network(best_long_rd_id);
+		}
+		else
+		{
+			LOG_WRN("No sink FT found. Retrying...");
+			k_msleep(NW_SCAN_RETRY_MS);
+			start_network_scan();
+		}
         break;
 
     case NET_EVENT_DECT_RSSI_SCAN_RESULT:
@@ -483,10 +809,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
 				data->channel,
 				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
-        break;
-
-    case NET_EVENT_DECT_SCAN_DONE:
-        LOG_INF("Scan complete");
         break;
 
 	case NET_EVENT_DECT_NEIGHBOR_LIST:
@@ -501,6 +823,26 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		}
 		break;
 
+	case NET_EVENT_DECT_ASSOCIATION_CHANGED:
+		const struct dect_association_changed_evt *evt = cb->info;
+
+		if(evt->association_change_type == DECT_ASSOCIATION_CREATED)
+		{
+			k_sem_give(&sem_association_created);
+
+			LOG_INF("Association created with RD 0x%08x (role: %s)",
+                    evt->long_rd_id,
+                    evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
+			);
+		}
+		else if(evt->association_change_type == DECT_ASSOCIATION_RELEASED ||
+				evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED)
+		{
+			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
+		}
+
+		break;
+
     default:
         LOG_WRN("Unhandled DECT event: 0x%llx", event);
         break;
@@ -512,68 +854,44 @@ int main(void)
 	int err;
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
-	LOG_INF("Device type: %s", DEVICE_TYPE_STR);
 
-	err = spi_slave_init();
-	if (err) {
-		LOG_ERR("Failed to initialize SPI slave: %d", err);
-	} else {
-		// Start the thread AFTER initialization
-		err = spi_slave_start_thread();
-		if (err) {
-			LOG_ERR("Failed to start SPI thread: %d", err);
-		}
-	}
+	/* --- Independent setup and initialization ---*/
 
-	err = uart_data_init();
-    if (err) {
-        LOG_ERR("Failed to initialize uart: %d", err);
-    } else {
-        LOG_INF("uart ready for image transfer");
-    }
-
-	/* Set hostname based on device type */
-	hello_dect_mac_set_hostname();
-
-	/* Setup network management callbacks for L4 connected/disconnected events */
+	// Setup network management callbacks for L4 connected/disconnected events
 	net_mgmt_init_event_callback(&net_conn_mgr_cb, net_conn_mgr_event_handler,
-				     NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
-
+		NET_EVENT_L4_CONNECTED | NET_EVENT_L4_DISCONNECTED);
 	net_mgmt_add_event_callback(&net_conn_mgr_cb);
 
-	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-    	NET_EVENT_DECT_SCAN_RESULT      |
-    	NET_EVENT_DECT_RSSI_SCAN_RESULT |
-    	NET_EVENT_DECT_SCAN_DONE		|
-		NET_EVENT_DECT_NEIGHBOR_LIST
-	);
-
-	net_mgmt_add_event_callback(&dect_event_cb);
-
-	net_mgmt_init_event_callback(&net_if_cb,
-				     net_if_event_handler,
-				     (NET_EVENT_IF_UP |
-				      NET_EVENT_IF_DOWN));
+	// Setup network interface callbacks
+	net_mgmt_init_event_callback(&net_if_cb, net_if_event_handler,
+		NET_EVENT_IF_UP | NET_EVENT_IF_DOWN);
 	net_mgmt_add_event_callback(&net_if_cb);
 
-	/* Get the DECT network interface */
+	// Setup callback for modem activation event
+	net_mgmt_init_event_callback(&net_activate_cb, net_activate_handler,
+		NET_EVENT_DECT_ACTIVATE_DONE			|
+		NET_EVENT_DECT_DEACTIVATE_DONE);
+	net_mgmt_add_event_callback(&net_activate_cb);
+
+	// Setup callbacks for DECT event callbacks
+	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
+		NET_EVENT_DECT_NETWORK_STATUS			|
+		NET_EVENT_DECT_SCAN_RESULT				|
+		NET_EVENT_DECT_SCAN_DONE				|
+		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
+		NET_EVENT_DECT_CLUSTER_CREATED_RESULT	|
+		NET_EVENT_DECT_ASSOCIATION_CHANGED);
+	net_mgmt_add_event_callback(&dect_event_cb);
+
+	// Get the DECT network interface 
 	dect_iface = net_if_get_first_by_type(&NET_L2_GET_NAME(DECT));
 	if (!dect_iface) {
 		LOG_ERR("No DECT interface found");
 		return -ENODEV;
 	}
 
-	/* Initialize modem library and this triggers DECT NR+ stack initialization */
-#if defined(CONFIG_NRF_MODEM_LIB)
-	err = nrf_modem_lib_init();
-	if (err) {
-		LOG_ERR("Failed to initialize modem library: %d", err);
-		return err;
-	}
-#endif
-
 #if defined(CONFIG_DK_LIBRARY)
-	/* Initialize DK library for buttons and LEDs */
+	// Initialize DK library for buttons and LEDs 
 	err = dk_buttons_init(button_handler);
 	if (err) {
 		LOG_WRN("Failed to initialize buttons: %d", err);
@@ -583,31 +901,75 @@ int main(void)
 	if (err) {
 		LOG_WRN("Failed to initialize LEDs: %d", err);
 	} else {
-		/* Initialize LEDs to OFF state */
+		// Initialize LEDs to OFF state 
 		dk_set_led_off(DK_LED1);
 		dk_set_led_off(DK_LED2);
 	}
+
+	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
-#if !defined(CONFIG_NET_L2_DECT_CONN_MGR_AUTO_CONNECT)
-	/* Initiate connection using connection manager */
-	LOG_INF("Initiating DECT connection...");
-	err = conn_mgr_if_connect(dect_iface);
+	// Initialize modem library and this triggers DECT NR+ stack initialization
+#if defined(CONFIG_NRF_MODEM_LIB)
+	err = nrf_modem_lib_init();
 	if (err) {
-		LOG_ERR("Failed to initiate connection: %d", err);
+		LOG_ERR("Failed to initialize modem library: %d", err);
 		return err;
 	}
 #endif
+
+	// Block until DECT is activated
+	LOG_INF("Wait for DECT stack to activate...");
+	k_sem_take(&sem_activate, K_FOREVER);
+
+	err = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
+	if (err)
+	{
+		LOG_ERR("Failed to deactivate DECT stack: %d", err);
+	}
+
+	// Block until deactivated
+	LOG_INF("Wait for DECT stack to deactivate...");
+	k_sem_take(&sem_deactivate, K_FOREVER);
+
+	// Write settings
+	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
+	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
+
+	// Activate stack again
+	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+	if (err)
+	{
+		LOG_ERR("Failed to activate DECT stack: %d", err);
+	}
+
+	k_sem_take(&sem_activate, K_FOREVER);
+
 	LOG_INF("Hello DECT application started successfully");
-	
-#if defined(CONFIG_DK_LIBRARY)
-	LOG_INF("Press button 1 to connect, button 2 to disconnect");
-#endif
-	
-	/* Main application loop - schedule tx work and run UDP receive in main thread */
-	k_work_schedule(&tx_work, K_SECONDS(5));
-	
-	hello_dect_mac_rx_thread();
-	
+
+	/* --- Sink FT and regular PT specific --- */
+
+	// FT:
+	// 1. Network start
+	// 2. Network beacon start
+	// 3. Cluster start
+	// 4. Cluster beacon start
+	// 5. Start Rx thread
+
+	// PT:
+	// 1. Network scan and join
+	// 2. Cluster scan and join
+	// 3. Start Tx messages every 30 seconds
+
+	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT (sink)
+		run_as_ft();
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT (edge)
+		run_as_pt();
+	else // Other combination
+		LOG_ERR("Unhandled device type combination");
+
+	while(1)
+		k_sleep(K_SECONDS(1));
+
 	return 0;
 }

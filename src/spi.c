@@ -133,7 +133,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
 
         if (ret < 0)
         {
-            LOG_INF("SPI transceive failed: %d", ret);
+            LOG_ERR("SPI transceive failed: %d", ret);
             k_sleep(K_MSEC(1000));
             continue;
         }
