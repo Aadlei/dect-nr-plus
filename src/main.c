@@ -4,8 +4,6 @@
  * SPDX-License-Identifier: LicenseRef-Nordic-5-Clause
  */
 
-// NOTE TO SELF: If the tx_work is not scheduled and not running, REMEMBER TO CONNECT ANOTHER DEVICE AS RECEIVER
-
 #include <zephyr/kernel.h>
 #include <zephyr/init.h>
 #include <zephyr/logging/log.h>
@@ -36,16 +34,22 @@
 #include <net/dect/dect_net_l2.h>
 #include <net/dect/dect_utils.h>
 
+#include "spi.h"
+#include "uart.h"
+
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 // CHANGE THIS BASED ON DEVICE TYPE
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
 #define DECT_SINK_LONG_RD_ID 		0x67214200U
+#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
+
 #define COMMON_PORT 				12345
 #define MESH_PREFIX_STR 			"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 			2000
 #define SOCKET_RECV_TIMEOUT_SEC 	5
+#define WORK_RESCHEDULE_TIME_SEC 10
 
 static struct in6_addr mesh_prefix;
 
@@ -57,8 +61,9 @@ static bool nw_beacon_started = false; // TODO: Fix this to more robust solution
 static uint32_t best_long_rd_id = 0;
 static uint8_t best_route_cost = 0xFF;
 static bool dect_connected;
-static uint32_t message_counter;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
+uint32_t message_counter;
+uint32_t current_long_rd_id;
 
 // Semaphores for controlling flow
 K_SEM_DEFINE(sem_if_up, 0, 1);
@@ -81,7 +86,7 @@ static void button_handler(uint32_t button_states, uint32_t has_changed);
 
 static void main_mac_print_network_info(struct net_if *iface);
 
-static void main_mac_tx_demo_message(void);
+static void main_tx_image_message(const uint8_t *image_data, size_t image_size);
 static int main_mac_start_udp_listener(void);
 static void main_mac_stop_udp_listener(void);
 static void main_mac_rx_thread(void);
@@ -99,16 +104,39 @@ static void run_as_ft(void);
 static void run_as_pt(void);
 
 // Tx work
-static void main_max_tx_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(tx_work, main_max_tx_work_handler);
-static void main_max_tx_work_handler(struct k_work *work)
+static void check_spi_image_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
+static void check_spi_image_work_handler(struct k_work *work)
 {
-	if (!dect_connected) return;
+	// First check if dect is connected so device can transmit
+	if (!dect_connected)
+	{
+		LOG_ERR("DECT not connected! Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+		return;
+	}
+
+	// No tx if no new image is available
+    if (!spi_slave_is_new_image_available())
+	{
+		LOG_WRN("No new image available. Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+		return;
+	}
+
+	const uint8_t *image_data = spi_slave_get_image_buffer();
+	size_t image_size = spi_slave_get_image_size();
 	
-	main_mac_tx_demo_message();
-	
+	LOG_INF("New image received: %zu bytes", image_size);
+
+	// Transmit over DECT
+	main_tx_image_message(image_data, image_size);
+
+	spi_slave_clear_image_flag();
+
 	// Reschedule work
-	k_work_schedule(&tx_work, K_SECONDS(30));
+	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 }
 
 // LED 2 turn-off work
@@ -164,25 +192,10 @@ static void main_mac_print_network_info(struct net_if *iface)
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
-static void main_mac_tx_demo_message(void)
+static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
 {
-	int sock, ret;
-	char message[512];
-
-	// Read long RD ID to put in message
-	struct dect_settings dev_settings = {0};
-
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-	}
-
-	uint32_t long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
-	snprintf(message, sizeof(message),
-		"Hello DECT NR+ from 0x%08x! Counter #%u",
-		long_rd_id, ++message_counter);
+	int sock;
+	int ret = -1;
 
 	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
 	if (sock < 0)
@@ -196,38 +209,55 @@ static void main_mac_tx_demo_message(void)
 	struct sockaddr_in6 sock_addr = 
 	{
 		.sin6_family = AF_INET6,
-		.sin6_port = htons(COMMON_PORT)
+		.sin6_port = htons(COMMON_PORT),
 	};
 
-	bool ok;
-	if (message_counter % 2 == 0) // TODO: Remember to remove this. Only for debug
-	{
-		// Wrong destination address
-		ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, 0x12345678);
-	}
-	else
-	{
-		// Sink address
-		ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
-	}
-	
+	// Sink address
+	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
 		return;
 	}
 
-	ret = sendto(sock, message, strlen(message), 0,
-				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
-	
+		// Send to sink address
+	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
 
-	if (ret < 0)
+	for (uint16_t i=0; i < total_chunks; i++)
 	{
-		LOG_ERR("Failed to send message: %d", errno);
+		size_t offset = i * MAX_PAYLOAD_SIZE;
+		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+		size_t total_size = sizeof(struct data_packet) + payload_len;
+
+		struct data_packet *packet = malloc(total_size);
+		if (packet == NULL)
+		{
+			LOG_ERR("Memory allocation failed!");
+			return;
+		}
+
+		packet->packet_idx = i;
+		packet->total_packets = total_chunks;
+		packet->payload_len = payload_len;
+
+		memcpy(packet->payload, image_data + offset, packet->payload_len);
+
+		ret = sendto(sock, packet, total_size, 0,
+			(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+
+		if (ret >= 0) // Success
+			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
+		else
+			LOG_ERR("Failed to send image chunk to FT: %d", ret);
+		
+		// Free the packet memory
+		free(packet);
 	}
+	
+	if (ret <= 0)
+		LOG_ERR("Failed to send image to FT: %d", ret);
 	else
-	{
-		LOG_INF("Sent: %s", message);
+		LOG_INF("Image sent to FT!");
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Cancel any pending LED 2 turn-off work 
@@ -237,7 +267,6 @@ static void main_mac_tx_demo_message(void)
 		// Schedule LED 2 to turn off after 1 second 
 		k_work_schedule(&led2_off_work, K_SECONDS(1));
 #endif
-	}
 
 	close(sock);
 }
@@ -303,53 +332,54 @@ static void main_mac_stop_udp_listener(void)
 
 static void main_mac_rx_thread(void)
 {
-	char buffer[256];
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len;
-	int ret;
-	int sock;
-	char addr_str[NET_IPV6_ADDR_LEN];
+    struct sockaddr_in6 src_addr;
+    socklen_t addr_len;
+    int ret;
+    int sock;
 
-	while (1)
+    while (true) // Main thread ends here in infinite loop
 	{
-		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0)
+        sock = atomic_get(&recv_socket_atomic);
+        if (sock < 0)
 		{
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
+            k_sleep(K_SECONDS(1)); 
+            continue;
+        }
 
-		addr_len = sizeof(src_addr);
-		ret = recvfrom(sock, buffer, sizeof(buffer) - 1, 0,
-			       (struct sockaddr *)&src_addr, &addr_len);
+        struct rx_chunk *chunk = uart_get_free_chunk();
 
-		if (ret < 0)
+        addr_len = sizeof(src_addr);
+        ret = recvfrom(sock, chunk->data, CHUNK_BUF_SIZE, 0,
+                   (struct sockaddr *)&src_addr, &addr_len);
+
+        if (ret < 0)
 		{
-			// Timeout - check if socket is still valid and continue
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				continue;
-			
-			// Check if socket was closed by another thread
-			if (atomic_get(&recv_socket_atomic) < 0)
-			{
-				LOG_DBG("Socket closed, waiting for reconnect");
-				continue;
-			}
+            uart_return_free_chunk(chunk);
+            if (errno == EAGAIN || errno == EWOULDBLOCK)
+                continue;
+            
+            if (atomic_get(&recv_socket_atomic) < 0)
+                continue;
+            
+            LOG_ERR("recvfrom failed: %d", errno);
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
 
-			LOG_ERR("recvfrom failed: %d", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-
-		if (ret > 0)
+        if (ret < (int)sizeof(struct data_packet))
 		{
-			buffer[ret] = '\0';
-			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
-				      addr_str, sizeof(addr_str));
-			LOG_INF("Received %d bytes from %s: %s",
-				ret, addr_str, buffer);
-		}
-	}
+            LOG_WRN("Packet too small: %d bytes", ret);
+            uart_return_free_chunk(chunk);
+            continue;
+        }
+
+        struct data_packet *pkt = (struct data_packet *)chunk->data;
+        LOG_INF("Chunk %d/%d (%d bytes)",
+            pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
+
+        chunk->data_len = ret;
+        uart_queue_chunk(chunk);
+    }
 }
 
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
@@ -436,6 +466,8 @@ static void write_ft_settings(void)
 		return;
 	}
 
+	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
 	LOG_INF("DECT sink FT settings successfully set");
 }
 
@@ -451,12 +483,14 @@ static void write_pt_settings(void)
 		return;
 	}
 
-	// Device type
+	// Device type and long RD ID
 	dev_settings.device_type = current_device_type;
+	dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
 
 	// Write bitmap
 	dev_settings.cmd_params.write_scope_bitmap = 
-		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE;
+		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE	|
+		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
 
 	// Write settings
 	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
@@ -465,6 +499,8 @@ static void write_pt_settings(void)
 		LOG_ERR("Failed to write settings: %d", ret);
 		return;
 	}
+
+	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
 
 	LOG_INF("DECT PT settings successfully set");
 }
@@ -555,8 +591,14 @@ static void run_as_ft(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
-	// Synchronize operation
+	ret = uart_data_init();
+	if (ret)
+	{
+		LOG_ERR("Failed to initialize UART: %d", ret);
+		return;
+	}
 
+	uart_tx_thread_start();
 	main_mac_rx_thread();
 }
 
@@ -574,8 +616,21 @@ static void run_as_pt(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
-	// Synchronize operation
+	// SPI slave start
+	int ret = spi_slave_init();
+	if (ret)
+	{
+		LOG_ERR("Failed to initialize SPI slave: %d", ret);
+		return;
+	}
+	ret = spi_slave_start_thread();
+	if (ret)
+	{
+		LOG_ERR("Failed to start SPI slave thread: %d", ret);
+		return;
+	}
 
+	spi_slave_start_thread();
 	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
 }
 
