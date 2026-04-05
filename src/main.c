@@ -45,7 +45,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
@@ -247,6 +247,7 @@ static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
 		}
 
 		packet->packet_idx = i;
+		packet->total_data_size = image_size;
 		packet->total_packets = total_chunks;
 		packet->payload_len = payload_len;
 
@@ -455,7 +456,12 @@ static void write_ft_settings(void)
 
 	// Device type and long rd id
 	dev_settings.device_type = current_device_type;
-	dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
+	dev_settings.device_type = current_device_type;
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	#endif
 
 	// Network beacon
 	// TODO: Fix from magic numbers
@@ -499,7 +505,11 @@ static void write_pt_settings(void)
 
 	// Device type and long RD ID
 	dev_settings.device_type = current_device_type;
-	dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
+	#endif
 
 	// Write bitmap
 	dev_settings.cmd_params.write_scope_bitmap = 

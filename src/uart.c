@@ -164,6 +164,7 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         uint16_t packet_idx   = pkt->packet_idx;
         uint16_t total_packets = pkt->total_packets;
         uint16_t payload_len  = pkt->payload_len;
+        
         uint32_t total_size   = pkt->total_data_size;
         memcpy(payload_copy, pkt->payload, payload_len);
 
