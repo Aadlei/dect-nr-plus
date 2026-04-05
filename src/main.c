@@ -45,7 +45,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
@@ -223,7 +223,11 @@ static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
 	};
 
 	// Sink address
-	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
+	#else
+    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_FT_LONG_RD_ID);
+	#endif
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
@@ -650,8 +654,8 @@ static void run_as_pt(void)
         return;
     }
 
-	// SPI slave start
 	#elif !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+	// SPI slave start
 	int ret = spi_slave_init();
 	if (ret)
 	{
@@ -664,8 +668,6 @@ static void run_as_pt(void)
 		LOG_ERR("Failed to start SPI slave thread: %d", ret);
 		return;
 	}
-
-	spi_slave_start_thread();
 	
 	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
 	#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
@@ -979,8 +981,8 @@ int main(void)
 	k_sem_take(&sem_deactivate, K_FOREVER);
 
 	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
-	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
+	if (current_device_type == DECT_DEVICE_TYPE_FT) write_ft_settings();
+	else if(current_device_type == DECT_DEVICE_TYPE_PT) write_pt_settings();
 
 	// Activate stack again
 	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
@@ -1007,11 +1009,11 @@ int main(void)
 	// 2. Cluster scan and join
 	// 3. Start Tx messages every 30 seconds
 
-	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT (sink)
-		run_as_ft();
-	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT (edge)
+	if (current_device_type == DECT_DEVICE_TYPE_FT)
+    	run_as_ft();
+	else if (current_device_type == DECT_DEVICE_TYPE_PT)
 		run_as_pt();
-	else // Other combination
+	else
 		LOG_ERR("Unhandled device type combination");
 
 	while(1)

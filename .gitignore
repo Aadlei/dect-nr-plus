@@ -12,6 +12,8 @@ FT/
 PT/
 *FT_SINK/
 FT_SINK/
+*PT_EDGE/
+PT_EDGE/
 
 # JetBrains
 .idea/
