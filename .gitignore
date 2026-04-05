@@ -6,6 +6,10 @@
 # build
 *build/
 build/
+*FT/
+FT/
+*PT/
+PT/
 
 # JetBrains
 .idea/
