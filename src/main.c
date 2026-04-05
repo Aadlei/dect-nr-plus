@@ -40,8 +40,16 @@
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 // CHANGE THIS BASED ON DEVICE TYPE
+#if defined(CONFIG_DECT_RELAY_FT)
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+#elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+#else
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+#endif
 
+#define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
+#define DECT_FT_LONG_RD_ID 			0x12345678U // Change this for each FT
 #define DECT_SINK_LONG_RD_ID 		0x67214200U
 #define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
 
@@ -103,7 +111,8 @@ static void join_network(uint32_t long_rd_id);
 static void run_as_ft(void);
 static void run_as_pt(void);
 
-// Tx work
+// Tx work for SPI
+#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 static void check_spi_image_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
 static void check_spi_image_work_handler(struct k_work *work)
@@ -138,6 +147,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
 	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 }
+#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 
 // LED 2 turn-off work
 #if defined(CONFIG_DK_LIBRARY)
@@ -445,7 +455,7 @@ static void write_ft_settings(void)
 
 	// Device type and long rd id
 	dev_settings.device_type = current_device_type;
-	dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
 
 	// Network beacon
 	// TODO: Fix from magic numbers
@@ -467,7 +477,11 @@ static void write_ft_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	#endif
 	LOG_INF("DECT sink FT settings successfully set");
 }
 
@@ -501,7 +515,11 @@ static void write_pt_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
+	#endif
 	LOG_INF("DECT PT settings successfully set");
 }
 
@@ -597,8 +615,6 @@ static void run_as_ft(void)
 		LOG_ERR("Failed to initialize UART: %d", ret);
 		return;
 	}
-
-	uart_tx_thread_start();
 	main_mac_rx_thread();
 }
 
@@ -616,7 +632,16 @@ static void run_as_pt(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    uart_rx_set_frame_callback(main_tx_image_message);  
+    int ret = uart_data_init();
+    if (ret) {
+        LOG_ERR("Failed to initialize UART RX: %d", ret);
+        return;
+    }
+
 	// SPI slave start
+	#elif !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 	int ret = spi_slave_init();
 	if (ret)
 	{
@@ -631,7 +656,9 @@ static void run_as_pt(void)
 	}
 
 	spi_slave_start_thread();
+	
 	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
+	#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 }
 
 static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
@@ -678,7 +705,10 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		// Reset message counter for new session 
 		message_counter = 0;
 		main_mac_stop_udp_listener();
+
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 		k_work_cancel_delayable(&tx_work);
+		#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn off LED 1 to indicate disconnection 
@@ -782,7 +812,13 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
-
+		#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+			// Relay PT must join sink FT directly, ignore relay FT
+			if (result->transmitter_long_rd_id != DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Ignoring non-sink FT 0x%08x", result->transmitter_long_rd_id);
+				break;
+			}
+		#endif
 		// TODO: When route cost is included, make decision here
 		best_long_rd_id = result->transmitter_long_rd_id;
 		best_route_cost = sink_result->route_cost;
