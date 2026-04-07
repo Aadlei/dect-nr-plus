@@ -45,7 +45,7 @@ struct SYNC_data
 };
 
 // CHANGE THIS BASED ON DEVICE TYPE
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 
 #define DECT_SINK_LONG_RD_ID 		0x67214200U
 #define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
@@ -54,7 +54,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #define MESH_PREFIX_STR 			"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 			2000
 #define SOCKET_RECV_TIMEOUT_SEC 	5
-#define WORK_RESCHEDULE_TIME_SEC 10
+#define WORK_RESCHEDULE_TIME_SEC 	10
 
 static struct in6_addr mesh_prefix;
 
@@ -213,7 +213,6 @@ static void SYNC_pt_operation(void)
 	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T0)
 	// 2. Wait for Rx...
 	// 3. At Rx --> Timestamp (T3)
-	struct SYNC_data SYNC_tx_packet = {0};
 
 	struct dect_status_info dev_info = {0};
 	ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
@@ -246,13 +245,9 @@ static void SYNC_pt_operation(void)
 	}
 
 	// Timestamp and Tx
-	uint32_t T0_before = k_uptime_get_32();
-	ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
+	SYNC_timestamps.T[0] = k_uptime_get_32();
+	ret = sendto(sock, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
 				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
-	uint32_t T0_after = k_uptime_get_32();
-
-	// T0
-	SYNC_timestamps.T[0] = (T0_after + T0_before) / 2;
 
 	if (ret < 0)
 		LOG_ERR("Failed to send SYNC packet: %d", errno);
@@ -284,7 +279,7 @@ static void SYNC_pt_operation(void)
 
 		// Timestamp and Rx
 		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(sock, &rx_from_parent, sizeof(rx_from_parent) - 1, 0,
+		ret = recvfrom(sock, &rx_from_parent, sizeof(rx_from_parent), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp_after = k_uptime_get_32();
 
@@ -294,6 +289,7 @@ static void SYNC_pt_operation(void)
 		if (rx_from_parent.T[0] != SYNC_timestamps.T[0])
 		{
 			LOG_ERR("Packet timestamps not matching for Tx and Rx packets");
+			// TODO: Restart SYNC process
 			return;
 		}
 
@@ -341,8 +337,10 @@ static void SYNC_pt_operation(void)
 	}
 
 	// Calculate total offset
-	SYNC_offset_parent = ((SYNC_timestamps.T[1] - SYNC_timestamps.T[0]) + (SYNC_timestamps.T[2] - SYNC_timestamps.T[3])) / 2;
+	SYNC_offset_parent = ((int32_t)(SYNC_timestamps.T[1] - SYNC_timestamps.T[0]) + (int32_t)(SYNC_timestamps.T[2] - SYNC_timestamps.T[3])) / 2;
 	SYNC_network_delay_parent = (SYNC_timestamps.T[3] - SYNC_timestamps.T[0]) - (SYNC_timestamps.T[2] - SYNC_timestamps.T[1]);
+
+	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
 }
 
 static void SYNC_ft_operation(void)
@@ -386,7 +384,7 @@ static void SYNC_ft_operation(void)
 
 		// Timestamp and Rx
 		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(sock, &rx_from_child, sizeof(rx_from_child) - 1, 0,
+		ret = recvfrom(sock, &rx_from_child, sizeof(rx_from_child), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp_after = k_uptime_get_32();
 		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
@@ -463,7 +461,7 @@ static void SYNC_ft_operation(void)
 	if (ret < 0)
 		LOG_ERR("Failed to send SYNC packet: %d", errno);
 	else
-		LOG_INF("SYNC packet sent");
+		LOG_INF("SYNC response packet sent");
 
 	close(sock);
 }
@@ -867,6 +865,11 @@ static void run_as_ft(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
+	// Start SYNC rx
+	SYNC_ft_operation();
+
+	k_sleep(K_SECONDS(20));
+
 	ret = uart_data_init();
 	if (ret)
 	{
@@ -889,8 +892,15 @@ static void run_as_pt(void)
 	LOG_INF("Blocking until network joined...");
 	k_sem_take(&sem_network_joined, K_FOREVER);
 
+	// TODO: Fix stopping here, if devices are not started at the same time
+
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
+
+	// Start SYNC tx
+	SYNC_pt_operation();
+
+	k_sleep(K_SECONDS(20));
 
 	// SPI slave start
 	int ret = spi_slave_init();
