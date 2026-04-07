@@ -39,6 +39,11 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
+struct SYNC_data
+{
+	uint32_t T[4];
+};
+
 // CHANGE THIS BASED ON DEVICE TYPE
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
@@ -64,6 +69,8 @@ static bool dect_connected;
 static atomic_t recv_socket_atomic = ATOMIC_INIT(-1);
 uint32_t message_counter;
 uint32_t current_long_rd_id;
+static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
+static uint32_t SYNC_network_delay_parent;
 
 // Semaphores for controlling flow
 K_SEM_DEFINE(sem_if_up, 0, 1);
@@ -85,6 +92,9 @@ static void button_handler(uint32_t button_states, uint32_t has_changed);
 #endif
 
 static void main_mac_print_network_info(struct net_if *iface);
+
+static void SYNC_pt_operation(void);
+static void SYNC_ft_operation(void);
 
 static void main_tx_image_message(const uint8_t *image_data, size_t image_size);
 static int main_mac_start_udp_listener(void);
@@ -192,6 +202,272 @@ static void main_mac_print_network_info(struct net_if *iface)
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
+static void SYNC_pt_operation(void)
+{
+	int ret;
+
+	struct SYNC_data SYNC_timestamps = {0};
+
+	// For PT:
+	// Get parent association info --> long RD ID --> Create IPv6
+	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T0)
+	// 2. Wait for Rx...
+	// 3. At Rx --> Timestamp (T3)
+	struct SYNC_data SYNC_tx_packet = {0};
+
+	struct dect_status_info dev_info = {0};
+	ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
+	if (ret)
+	{
+		LOG_ERR("Failed to get DECT status info: %d", ret);
+		return;
+	}
+
+	uint32_t parent_long_rd_id = dev_info.parent_associations->long_rd_id;
+
+	// Setup socket
+	int sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0)
+	{
+		LOG_ERR("Failed to create socket: %d", errno);
+		return;
+	}
+
+	struct sockaddr_in6 sock_addr = 
+	{
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(COMMON_PORT)
+	};
+	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, parent_long_rd_id);
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
+
+	// Timestamp and Tx
+	uint32_t T0_before = k_uptime_get_32();
+	ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
+				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+	uint32_t T0_after = k_uptime_get_32();
+
+	// T0
+	SYNC_timestamps.T[0] = (T0_after + T0_before) / 2;
+
+	if (ret < 0)
+		LOG_ERR("Failed to send SYNC packet: %d", errno);
+	else
+		LOG_INF("SYNC packet sent");
+
+	close(sock);
+
+	// Wait for interface to go up and UDP listener started
+	k_sem_take(&sem_if_up, K_FOREVER);
+
+	// Rx
+	struct sockaddr_in6 src_addr;
+	socklen_t addr_len = sizeof(src_addr);
+	char addr_str[NET_IPV6_ADDR_LEN];
+	
+	while (1)
+	{
+		struct SYNC_data rx_from_parent;
+
+		sock = atomic_get(&recv_socket_atomic);
+		if (sock < 0)
+		{
+			k_sleep(K_SECONDS(1));
+			LOG_WRN("Failed to get socket on Rx. Retrying in 1 second...");
+			// TODO: Restart process here because it ruins the timing
+			continue;
+		}
+
+		// Timestamp and Rx
+		uint32_t T_temp_before = k_uptime_get_32();
+		ret = recvfrom(sock, &rx_from_parent, sizeof(rx_from_parent) - 1, 0,
+				(struct sockaddr *)&src_addr, &addr_len);
+		uint32_t T_temp_after = k_uptime_get_32();
+
+		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+
+		// TODO: Check if rx matches struct size (that the packet is correct)
+		if (rx_from_parent.T[0] != SYNC_timestamps.T[0])
+		{
+			LOG_ERR("Packet timestamps not matching for Tx and Rx packets");
+			return;
+		}
+
+		if (ret < 0)
+		{
+			// Timeout - check if socket is still valid and continue
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				continue;
+			
+			// Check if socket was closed by another thread
+			if (atomic_get(&recv_socket_atomic) < 0)
+			{
+				LOG_DBG("Socket closed, waiting for reconnect");
+				continue;
+			}
+
+			LOG_ERR("recvfrom failed: %d", errno);
+			k_sleep(K_SECONDS(1));
+			continue;
+		}
+
+		if (ret > 0)
+		{
+			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
+					addr_str, sizeof(addr_str));
+			LOG_INF("Received %d bytes from %s",
+				ret, addr_str);
+
+			uint32_t rcv_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+			if (rcv_long_rd_id == parent_long_rd_id)
+			{
+				LOG_INF("Rx packet long RD ID matching. Exiting Rx...");
+
+				SYNC_timestamps.T[1] = rx_from_parent.T[1];
+				SYNC_timestamps.T[2] = rx_from_parent.T[2];
+				SYNC_timestamps.T[3] = T_temp;
+				break;
+			}
+			else
+			{
+				LOG_WRN("Long RD ID not matching");
+			}
+		}
+	}
+
+	// Calculate total offset
+	SYNC_offset_parent = ((SYNC_timestamps.T[1] - SYNC_timestamps.T[0]) + (SYNC_timestamps.T[2] - SYNC_timestamps.T[3])) / 2;
+	SYNC_network_delay_parent = (SYNC_timestamps.T[3] - SYNC_timestamps.T[0]) - (SYNC_timestamps.T[2] - SYNC_timestamps.T[1]);
+}
+
+static void SYNC_ft_operation(void)
+{
+	struct SYNC_data SYNC_timestamps = {0};
+	
+	// For FT:
+	// Get first child association --> Long RD ID --> Create IPv6
+	// 1. Wait for Rx...
+	// 2. At Rx --> Timestamp (T1)
+	// 3. Timestamp 1 --> sendto(FT) --> Timestamp 2 (Average: T2)
+
+	struct dect_status_info dev_info = {0};
+	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
+	if (ret)
+	{
+		LOG_ERR("Failed to get DECT status info: %d", ret);
+		return;
+	}
+
+	uint32_t child_long_rd_id = dev_info.child_associations[0].long_rd_id; // Get first child
+
+	// Setup socket and UDP Rx
+	struct sockaddr_in6 src_addr;
+	socklen_t addr_len = sizeof(src_addr);
+	char addr_str[NET_IPV6_ADDR_LEN];
+	int sock;
+
+	while (1)
+	{
+		struct SYNC_data rx_from_child;
+
+		sock = atomic_get(&recv_socket_atomic);
+		if (sock < 0)
+		{
+			k_sleep(K_SECONDS(1));
+			LOG_WRN("Failed to get socket on Rx. Retrying in 1 second...");
+			// TODO: Restart process here because it ruins the timing
+			continue;
+		}
+
+		// Timestamp and Rx
+		uint32_t T_temp_before = k_uptime_get_32();
+		ret = recvfrom(sock, &rx_from_child, sizeof(rx_from_child) - 1, 0,
+				(struct sockaddr *)&src_addr, &addr_len);
+		uint32_t T_temp_after = k_uptime_get_32();
+		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+
+		if (ret < 0)
+		{
+			// Timeout - check if socket is still valid and continue
+			if (errno == EAGAIN || errno == EWOULDBLOCK)
+				continue;
+			
+			// Check if socket was closed by another thread
+			if (atomic_get(&recv_socket_atomic) < 0)
+			{
+				LOG_DBG("Socket closed, waiting for reconnect");
+				continue;
+			}
+
+			LOG_ERR("recvfrom failed: %d", errno);
+			k_sleep(K_SECONDS(1));
+			continue;
+		}
+
+		if (ret > 0)
+		{
+			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
+					addr_str, sizeof(addr_str));
+			LOG_INF("Received %d bytes from %s",
+				ret, addr_str);
+
+			uint32_t rcv_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+			if (rcv_long_rd_id == child_long_rd_id)
+			{
+				LOG_INF("Rx packet long RD ID matching. Exiting Rx...");
+				
+				SYNC_timestamps.T[0] = rx_from_child.T[0];
+				SYNC_timestamps.T[1] = T_temp;
+				break;
+			}
+			else
+			{
+				LOG_WRN("Long RD ID not matching");
+			}
+		}
+	}
+
+	// Tx response packet
+	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (sock < 0)
+	{
+		LOG_ERR("Failed to create socket: %d", errno);
+		return;
+	}
+
+	struct sockaddr_in6 sock_addr = 
+	{
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(COMMON_PORT)
+	};
+	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, child_long_rd_id);
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address");
+		return;
+	}
+
+	// Timestamp and Tx
+	struct SYNC_data SYNC_tx_packet = SYNC_timestamps;
+
+	SYNC_tx_packet.T[2] = k_uptime_get_32();	// Slight inaccurate, because cant timestamp after Tx
+	ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
+				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+
+	if (ret < 0)
+		LOG_ERR("Failed to send SYNC packet: %d", errno);
+	else
+		LOG_INF("SYNC packet sent");
+
+	close(sock);
+}
+
 static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
 {
 	int sock;
@@ -220,7 +496,7 @@ static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
 		return;
 	}
 
-		// Send to sink address
+	// Send to sink address
 	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
 
 	for (uint16_t i=0; i < total_chunks; i++)
