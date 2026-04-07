@@ -41,20 +41,23 @@ LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 struct SYNC_data
 {
+	uint32_t magic_signature;
 	uint32_t T[4];
 };
 
 // CHANGE THIS BASED ON DEVICE TYPE
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
-#define DECT_SINK_LONG_RD_ID 		0x67214200U
-#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
+#define DECT_SINK_LONG_RD_ID 			0x67214200U
+#define DECT_PT_LONG_RD_ID				0x11223344U // Change this for each PT
 
-#define COMMON_PORT 				12345
-#define MESH_PREFIX_STR 			"fd12:3456:789a"
-#define NW_SCAN_RETRY_MS 			2000
-#define SOCKET_RECV_TIMEOUT_SEC 	5
-#define WORK_RESCHEDULE_TIME_SEC 	10
+#define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
+#define COMMON_PORT 					12345
+#define MESH_PREFIX_STR 				"fd12:3456:789a"
+#define NW_SCAN_RETRY_MS 				2000
+#define SOCKET_RECV_TIMEOUT_SEC 		5
+#define SYNC_TIMEOUT					5000
+#define WORK_RESCHEDULE_TIME_SEC 		10
 
 static struct in6_addr mesh_prefix;
 
@@ -93,8 +96,8 @@ static void button_handler(uint32_t button_states, uint32_t has_changed);
 
 static void main_mac_print_network_info(struct net_if *iface);
 
-static void SYNC_pt_operation(void);
-static void SYNC_ft_operation(void);
+static int SYNC_pt_operation(void);
+static int SYNC_ft_operation(void);
 
 static void main_tx_image_message(const uint8_t *image_data, size_t image_size);
 static int main_mac_start_udp_listener(void);
@@ -202,24 +205,18 @@ static void main_mac_print_network_info(struct net_if *iface)
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
-static void SYNC_pt_operation(void)
+static int SYNC_pt_operation(void)
 {
 	int ret;
 
 	struct SYNC_data SYNC_timestamps = {0};
-
-	// For PT:
-	// Get parent association info --> long RD ID --> Create IPv6
-	// 1. Timestamp 1 --> sendto(PT) --> Timestamp 2 (Average: T0)
-	// 2. Wait for Rx...
-	// 3. At Rx --> Timestamp (T3)
 
 	struct dect_status_info dev_info = {0};
 	ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
 	if (ret)
 	{
 		LOG_ERR("Failed to get DECT status info: %d", ret);
-		return;
+		return -1;
 	}
 
 	uint32_t parent_long_rd_id = dev_info.parent_associations->long_rd_id;
@@ -229,7 +226,7 @@ static void SYNC_pt_operation(void)
 	if (sock < 0)
 	{
 		LOG_ERR("Failed to create socket: %d", errno);
-		return;
+		return -1;
 	}
 
 	struct sockaddr_in6 sock_addr = 
@@ -241,41 +238,45 @@ static void SYNC_pt_operation(void)
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
-		return;
+		return -1;
 	}
 
 	// Timestamp and Tx
+	SYNC_timestamps.magic_signature = SYNC_MAGIC_SIGNATURE;
 	SYNC_timestamps.T[0] = k_uptime_get_32();
 	ret = sendto(sock, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
 				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
 
 	if (ret < 0)
+	{
 		LOG_ERR("Failed to send SYNC packet: %d", errno);
-	else
-		LOG_INF("SYNC packet sent");
+		return -1;
+	}
+	else LOG_INF("SYNC packet sent");
 
 	close(sock);
 
 	// Wait for interface to go up and UDP listener started
-	k_sem_take(&sem_if_up, K_FOREVER);
+	k_sem_take(&sem_if_up, K_MSEC(SYNC_TIMEOUT * 3));
 
 	// Rx
 	struct sockaddr_in6 src_addr;
 	socklen_t addr_len = sizeof(src_addr);
 	char addr_str[NET_IPV6_ADDR_LEN];
+
+	uint32_t timer_start = k_uptime_get_32();
 	
 	while (1)
 	{
+		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
+		{
+			LOG_ERR("SYNC timeout");
+			return -1;
+		}
+
 		struct SYNC_data rx_from_parent;
 
 		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0)
-		{
-			k_sleep(K_SECONDS(1));
-			LOG_WRN("Failed to get socket on Rx. Retrying in 1 second...");
-			// TODO: Restart process here because it ruins the timing
-			continue;
-		}
 
 		// Timestamp and Rx
 		uint32_t T_temp_before = k_uptime_get_32();
@@ -285,12 +286,13 @@ static void SYNC_pt_operation(void)
 
 		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
 
-		// TODO: Check if rx matches struct size (that the packet is correct)
-		if (rx_from_parent.T[0] != SYNC_timestamps.T[0])
+		// Check if packet is correct
+		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
-			LOG_ERR("Packet timestamps not matching for Tx and Rx packets");
-			// TODO: Restart SYNC process
-			return;
+			LOG_ERR("Incorrect packet received for SYNC process");
+			LOG_WRN("Magic field in Rx: 0x%08x", rx_from_parent.magic_signature);
+			LOG_WRN("Magic field: 0x%08x", SYNC_MAGIC_SIGNATURE);
+			return -1;
 		}
 
 		if (ret < 0)
@@ -341,24 +343,20 @@ static void SYNC_pt_operation(void)
 	SYNC_network_delay_parent = (SYNC_timestamps.T[3] - SYNC_timestamps.T[0]) - (SYNC_timestamps.T[2] - SYNC_timestamps.T[1]);
 
 	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
+
+	return 1;
 }
 
-static void SYNC_ft_operation(void)
+static int SYNC_ft_operation(void)
 {
 	struct SYNC_data SYNC_timestamps = {0};
-	
-	// For FT:
-	// Get first child association --> Long RD ID --> Create IPv6
-	// 1. Wait for Rx...
-	// 2. At Rx --> Timestamp (T1)
-	// 3. Timestamp 1 --> sendto(FT) --> Timestamp 2 (Average: T2)
 
 	struct dect_status_info dev_info = {0};
 	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
 	if (ret)
 	{
 		LOG_ERR("Failed to get DECT status info: %d", ret);
-		return;
+		return -1;
 	}
 
 	uint32_t child_long_rd_id = dev_info.child_associations[0].long_rd_id; // Get first child
@@ -374,13 +372,6 @@ static void SYNC_ft_operation(void)
 		struct SYNC_data rx_from_child;
 
 		sock = atomic_get(&recv_socket_atomic);
-		if (sock < 0)
-		{
-			k_sleep(K_SECONDS(1));
-			LOG_WRN("Failed to get socket on Rx. Retrying in 1 second...");
-			// TODO: Restart process here because it ruins the timing
-			continue;
-		}
 
 		// Timestamp and Rx
 		uint32_t T_temp_before = k_uptime_get_32();
@@ -388,6 +379,16 @@ static void SYNC_ft_operation(void)
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp_after = k_uptime_get_32();
 		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+
+		// Check if packet is correct
+		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
+		{
+			LOG_ERR("Incorrect packet received for SYNC process");
+			LOG_WRN("Magic field in Rx: 0x%08x", rx_from_child.magic_signature);
+			LOG_WRN("Magic field: 0x%08x", SYNC_MAGIC_SIGNATURE);
+			LOG_WRN("Result 0x%08x ^ 0x%08x = %d", rx_from_child.magic_signature, SYNC_MAGIC_SIGNATURE, rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE);
+			return -1;
+		}
 
 		if (ret < 0)
 		{
@@ -436,7 +437,7 @@ static void SYNC_ft_operation(void)
 	if (sock < 0)
 	{
 		LOG_ERR("Failed to create socket: %d", errno);
-		return;
+		return -1;
 	}
 
 	struct sockaddr_in6 sock_addr = 
@@ -448,22 +449,27 @@ static void SYNC_ft_operation(void)
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
-		return;
+		return -1;
 	}
 
 	// Timestamp and Tx
 	struct SYNC_data SYNC_tx_packet = SYNC_timestamps;
 
+	SYNC_tx_packet.magic_signature = SYNC_MAGIC_SIGNATURE;
 	SYNC_tx_packet.T[2] = k_uptime_get_32();	// Slight inaccurate, because cant timestamp after Tx
 	ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
 				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
 
 	if (ret < 0)
+	{
 		LOG_ERR("Failed to send SYNC packet: %d", errno);
-	else
-		LOG_INF("SYNC response packet sent");
+		return -1;
+	}
+	else LOG_INF("SYNC response packet sent");
 
 	close(sock);
+
+	return 1;
 }
 
 static void main_tx_image_message(const uint8_t *image_data, size_t image_size)
@@ -866,7 +872,12 @@ static void run_as_ft(void)
 	k_sem_take(&sem_association_created, K_FOREVER);
 
 	// Start SYNC rx
-	SYNC_ft_operation();
+	int success = SYNC_ft_operation();
+	while (success < 0)
+	{
+		success = SYNC_ft_operation();
+		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
+	}
 
 	k_sleep(K_SECONDS(20));
 
@@ -898,9 +909,14 @@ static void run_as_pt(void)
 	k_sem_take(&sem_association_created, K_FOREVER);
 
 	// Start SYNC tx
-	SYNC_pt_operation();
+	int success = SYNC_pt_operation();
+	while (success < 0) 
+	{
+		success = SYNC_pt_operation();
+		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
+	}
 
-	k_sleep(K_SECONDS(20));
+	k_sleep(K_SECONDS(20)); // Temp because SPI thread is buggy
 
 	// SPI slave start
 	int ret = spi_slave_init();
@@ -1259,3 +1275,5 @@ int main(void)
 
 	return 0;
 }
+
+// TODO: Handle association disconnect
