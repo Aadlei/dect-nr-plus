@@ -108,12 +108,13 @@ static int SYNC_pt_operation(void);
 static int SYNC_ft_operation(void);
 
 // TX and RX threads
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id);
 static void rx_thread(void);
+static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id);
 
 // Helper functions
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
 static uint32_t get_parent_long_rd_id(void);
+static uint32_t get_first_child_long_rd_id();
 
 // IPv6 creation for device
 static void create_and_set_device_ipv6(void);
@@ -304,55 +305,48 @@ static int SYNC_pt_operation(void)
 
 	struct SYNC_data SYNC_timestamps = {0};
 
-	struct dect_status_info dev_info = {0};
-	ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
-	if (ret)
+	uint32_t parent_long_rd_id = get_parent_long_rd_id();
+	if (parent_long_rd_id == 0)
 	{
-		LOG_ERR("Failed to get DECT status info: %d", ret);
+		LOG_WRN("Invalid long RD ID for parent");
 		return -1;
 	}
 
-	uint32_t parent_long_rd_id = dev_info.parent_associations->long_rd_id;
-
-	// Setup socket
-	int sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0)
-	{
-		LOG_ERR("Failed to create socket: %d", errno);
-		return -1;
-	}
-
-	struct sockaddr_in6 sock_addr = 
+	struct sockaddr_in6 dst_addr = 
 	{
 		.sin6_family = AF_INET6,
 		.sin6_port = htons(SOCKET_COMMON_PORT)
 	};
-	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, parent_long_rd_id);
+	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, parent_long_rd_id);
 	if(!ok)
 	{
-		LOG_ERR("Failed to create IPv6 address");
+		LOG_WRN("Failed to create IPv6 address");
 		return -1;
 	}
 
 	// Timestamp and TX
+	if (tx_socket < 0)
+	{
+		LOG_WRN("TX socket not open");
+		return -1;
+	}
+
 	SYNC_timestamps.magic_signature = SYNC_MAGIC_SIGNATURE;
 	SYNC_timestamps.T[0] = k_uptime_get_32();
-	ret = sendto(sock, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
-				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+	ret = sendto(tx_socket, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
+				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
 
 	if (ret < 0)
 	{
-		LOG_ERR("Failed to send SYNC packet: %d", errno);
+		LOG_WRN("Failed to send SYNC packet: %d", errno);
 		return -1;
 	}
 	else LOG_INF("SYNC packet sent");
 
-	close(sock);
-
-	// Wait for interface to go up and UDP listener started
+	// Wait for interface to go up and RX socket open
+	LOG_INF("Waiting for RX socket to open...");
 	k_sem_take(&sem_if_up, K_MSEC(SYNC_TIMEOUT * 3));
 
-	// RX
 	struct sockaddr_in6 src_addr;
 	socklen_t addr_len = sizeof(src_addr);
 	char addr_str[NET_IPV6_ADDR_LEN];
@@ -363,17 +357,21 @@ static int SYNC_pt_operation(void)
 	{
 		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
 		{
-			LOG_ERR("SYNC timeout");
+			LOG_WRN("SYNC timeout");
+			return -1;
+		}
+
+		if (rx_socket < 0)
+		{
+			LOG_WRN("RX socket not open");
 			return -1;
 		}
 
 		struct SYNC_data rx_from_parent;
 
-		sock = atomic_get(&recv_socket_atomic);
-
 		// Timestamp and RX
 		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(sock, &rx_from_parent, sizeof(rx_from_parent), 0,
+		ret = recvfrom(rx_socket, &rx_from_parent, sizeof(rx_from_parent), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp_after = k_uptime_get_32();
 
@@ -382,52 +380,34 @@ static int SYNC_pt_operation(void)
 		// Check if packet is correct
 		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
-			LOG_ERR("Incorrect packet received for SYNC process");
-			LOG_WRN("Magic field in RX: 0x%08x", rx_from_parent.magic_signature);
-			LOG_WRN("Magic field: 0x%08x", SYNC_MAGIC_SIGNATURE);
+			LOG_WRN("Packet signature not matching for SYNC packet");
 			return -1;
 		}
 
 		if (ret < 0)
 		{
-			// Timeout - check if socket is still valid and continue
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				continue;
-			
-			// Check if socket was closed by another thread
-			if (atomic_get(&recv_socket_atomic) < 0)
-			{
-				LOG_DBG("Socket closed, waiting for reconnect");
-				continue;
-			}
-
-			LOG_ERR("recvfrom failed: %d", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
+			LOG_WRN("RX failed: %d", errno);
+			return -1;
 		}
 
-		if (ret > 0)
+		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
+		LOG_INF("Received %d bytes from %s", ret, addr_str);
+
+		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+		if (rx_long_rd_id == parent_long_rd_id)
 		{
-			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
-					addr_str, sizeof(addr_str));
-			LOG_INF("Received %d bytes from %s",
-				ret, addr_str);
+			LOG_INF("RX packet long RD ID matching. Exiting RX...");
 
-			uint32_t rcv_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-			if (rcv_long_rd_id == parent_long_rd_id)
-			{
-				LOG_INF("RX packet long RD ID matching. Exiting RX...");
-
-				SYNC_timestamps.T[1] = rx_from_parent.T[1];
-				SYNC_timestamps.T[2] = rx_from_parent.T[2];
-				SYNC_timestamps.T[3] = T_temp;
-				break;
-			}
-			else
-			{
-				LOG_WRN("Long RD ID not matching");
-			}
+			SYNC_timestamps.T[1] = rx_from_parent.T[1];
+			SYNC_timestamps.T[2] = rx_from_parent.T[2];
+			SYNC_timestamps.T[3] = T_temp;
+			break;
+		}
+		else
+		{
+			LOG_WRN("Long RD ID not matching");
+			return -1;
 		}
 	}
 
@@ -437,38 +417,39 @@ static int SYNC_pt_operation(void)
 
 	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
 
-	return 1;
+	return 0;
 }
 
 static int SYNC_ft_operation(void)
 {
+	int ret;
+
 	struct SYNC_data SYNC_timestamps = {0};
 
-	struct dect_status_info dev_info = {0};
-	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
-	if (ret)
+	uint32_t child_long_rd_id = get_first_child_long_rd_id();
+	if (child_long_rd_id == 0)
 	{
-		LOG_ERR("Failed to get DECT status info: %d", ret);
+		LOG_WRN("Invalid long RD ID for child");
 		return -1;
 	}
 
-	uint32_t child_long_rd_id = dev_info.child_associations[0].long_rd_id; // Get first child
-
-	// Setup socket and UDP RX
 	struct sockaddr_in6 src_addr;
 	socklen_t addr_len = sizeof(src_addr);
 	char addr_str[NET_IPV6_ADDR_LEN];
-	int sock;
 
 	while (1)
 	{
-		struct SYNC_data rx_from_child;
+		if (rx_socket < 0)
+		{
+			LOG_WRN("RX socket not open");
+			return -1;
+		}
 
-		sock = atomic_get(&recv_socket_atomic);
+		struct SYNC_data rx_from_child;
 
 		// Timestamp and RX
 		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(sock, &rx_from_child, sizeof(rx_from_child), 0,
+		ret = recvfrom(rx_socket, &rx_from_child, sizeof(rx_from_child), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp_after = k_uptime_get_32();
 		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
@@ -476,69 +457,42 @@ static int SYNC_ft_operation(void)
 		// Check if packet is correct
 		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
-			LOG_ERR("Incorrect packet received for SYNC process");
-			LOG_WRN("Magic field in RX: 0x%08x", rx_from_child.magic_signature);
-			LOG_WRN("Magic field: 0x%08x", SYNC_MAGIC_SIGNATURE);
-			LOG_WRN("Result 0x%08x ^ 0x%08x = %d", rx_from_child.magic_signature, SYNC_MAGIC_SIGNATURE, rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE);
+			LOG_WRN("Packet signature not matching for SYNC packet");
 			return -1;
 		}
 
 		if (ret < 0)
 		{
-			// Timeout - check if socket is still valid and continue
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				continue;
-			
-			// Check if socket was closed by another thread
-			if (atomic_get(&recv_socket_atomic) < 0)
-			{
-				LOG_DBG("Socket closed, waiting for reconnect");
-				continue;
-			}
-
-			LOG_ERR("recvfrom failed: %d", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
+			LOG_WRN("RX failed: %d", errno);
+			return -1;
 		}
 
-		if (ret > 0)
+		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
+		LOG_INF("Received %d bytes from %s", ret, addr_str);
+
+		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+		if (rx_long_rd_id == child_long_rd_id)
 		{
-			net_addr_ntop(AF_INET6, &src_addr.sin6_addr,
-					addr_str, sizeof(addr_str));
-			LOG_INF("Received %d bytes from %s",
-				ret, addr_str);
+			LOG_INF("RX packet long RD ID matching. Exiting RX...");
 
-			uint32_t rcv_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-			if (rcv_long_rd_id == child_long_rd_id)
-			{
-				LOG_INF("RX packet long RD ID matching. Exiting RX...");
-				
-				SYNC_timestamps.T[0] = rx_from_child.T[0];
-				SYNC_timestamps.T[1] = T_temp;
-				break;
-			}
-			else
-			{
-				LOG_WRN("Long RD ID not matching");
-			}
+			SYNC_timestamps.T[0] = rx_from_child.T[0];
+			SYNC_timestamps.T[1] = T_temp;
+			break;
+		}
+		else
+		{
+			LOG_WRN("Long RD ID not matching");
+			return -1;
 		}
 	}
 
-	// TX response packet
-	sock = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (sock < 0)
-	{
-		LOG_ERR("Failed to create socket: %d", errno);
-		return -1;
-	}
-
-	struct sockaddr_in6 sock_addr = 
+	struct sockaddr_in6 dst_addr = 
 	{
 		.sin6_family = AF_INET6,
 		.sin6_port = htons(SOCKET_COMMON_PORT)
 	};
-	bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, child_long_rd_id);
+	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
@@ -546,87 +500,27 @@ static int SYNC_ft_operation(void)
 	}
 
 	// Timestamp and TX
+	if (tx_socket < 0)
+	{
+		LOG_WRN("TX socket not open");
+		return -1;
+	}
+
 	struct SYNC_data SYNC_tx_packet = SYNC_timestamps;
 
 	SYNC_tx_packet.magic_signature = SYNC_MAGIC_SIGNATURE;
 	SYNC_tx_packet.T[2] = k_uptime_get_32();	// Slight inaccurate, because cant timestamp after TX
-	ret = sendto(sock, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
-				(struct sockaddr *)&sock_addr, sizeof(sock_addr));
+	ret = sendto(tx_socket, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
+				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
 
 	if (ret < 0)
 	{
-		LOG_ERR("Failed to send SYNC packet: %d", errno);
+		LOG_WRN("Failed to send SYNC packet: %d", errno);
 		return -1;
 	}
-	else LOG_INF("SYNC response packet sent");
+	else LOG_INF("SYNC packet sent");
 
-	close(sock);
-
-	return 1;
-}
-
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id)
-{
-	int ret = -1;
-
-	// Destination address
-	struct sockaddr_in6 dst_addr = 
-	{
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SOCKET_COMMON_PORT),
-	};
-
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, dst_long_rd_id);
-	if(!ok)
-	{
-		LOG_ERR("Failed to create IPv6 address");
-		return;
-	}
-
-	// Send chunks to destination
-	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
-
-	for (uint16_t i=0; i < total_chunks; i++)
-	{
-		size_t offset = i * MAX_PAYLOAD_SIZE;
-		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
-		size_t total_size = sizeof(struct data_packet) + payload_len;
-
-		struct data_packet *packet = malloc(total_size);
-		if (packet == NULL)
-		{
-			LOG_ERR("Memory allocation failed!");
-			return;
-		}
-
-		packet->packet_idx = i;
-		packet->total_packets = total_chunks;
-		packet->payload_len = payload_len;
-
-		memcpy(packet->payload, image_data + offset, packet->payload_len);
-
-		ret = sendto(tx_socket, packet, total_size, 0,
-			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-		if (ret >= 0) // Success
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-		else
-			LOG_ERR("Failed to send image chunk to destination: %d", ret);
-		
-		// Free the packet memory
-		free(packet);
-	}
-	
-	LOG_INF("Sent packet to destination");
-
-#if defined(CONFIG_DK_LIBRARY)
-		// Cancel any pending LED 2 turn-off work 
-		k_work_cancel_delayable(&led2_off_work);
-		// Turn on LED 2 to indicate successful transmission 
-		dk_set_led_on(DK_LED2);
-		// Schedule LED 2 to turn off after 1 second 
-		k_work_schedule(&led2_off_work, K_SECONDS(1));
-#endif
+	return 0;
 }
 
 static void rx_thread(void)
@@ -675,6 +569,76 @@ static void rx_thread(void)
     }
 }
 
+static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id)
+{
+	int ret = -1;
+
+	// Destination address
+	struct sockaddr_in6 dst_addr = 
+	{
+		.sin6_family = AF_INET6,
+		.sin6_port = htons(SOCKET_COMMON_PORT),
+	};
+
+	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, dst_long_rd_id);
+	if(!ok)
+	{
+		LOG_ERR("Failed to create IPv6 address. Aborting transmission");
+		return;
+	}
+
+	// Send chunks to destination
+	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
+
+	if (tx_socket < 0)
+	{
+		LOG_WRN("TX socket not open. Aborting transmission");
+		return;
+	}
+
+	for (uint16_t i=0; i < total_chunks; i++)
+	{
+		size_t offset = i * MAX_PAYLOAD_SIZE;
+		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+		size_t total_size = sizeof(struct data_packet) + payload_len;
+
+		struct data_packet *packet = malloc(total_size);
+		if (packet == NULL)
+		{
+			LOG_ERR("Memory allocation failed!");
+			return;
+		}
+
+		packet->packet_idx = i;
+		packet->total_packets = total_chunks;
+		packet->payload_len = payload_len;
+
+		memcpy(packet->payload, image_data + offset, packet->payload_len);
+
+		ret = sendto(tx_socket, packet, total_size, 0,
+			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
+
+		if (ret >= 0) // Success
+			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
+		else
+			LOG_ERR("Failed to send image chunk to destination: %d", ret);
+		
+		// Free the packet memory
+		free(packet);
+	}
+	
+	LOG_INF("Sent packet to destination");
+
+#if defined(CONFIG_DK_LIBRARY)
+		// Cancel any pending LED 2 turn-off work 
+		k_work_cancel_delayable(&led2_off_work);
+		// Turn on LED 2 to indicate successful transmission 
+		dk_set_led_on(DK_LED2);
+		// Schedule LED 2 to turn off after 1 second 
+		k_work_schedule(&led2_off_work, K_SECONDS(1));
+#endif
+}
+
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
 {
 	// 64-bit prefix + 32-bit sink long rd id + 32-bit long rd id of device (same as sink)
@@ -704,6 +668,20 @@ static uint32_t get_parent_long_rd_id(void)
 	}
 
 	return dev_info.parent_associations->long_rd_id;
+}
+
+static uint32_t get_first_child_long_rd_id()
+{
+	struct dect_status_info dev_info = {0};
+
+	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
+	if (ret)
+	{
+		LOG_ERR("Failed to get device status info: %d", ret);
+		return 0;
+	}
+
+	return dev_info.child_associations[0].long_rd_id;
 }
 
 static void create_and_set_device_ipv6(void)
