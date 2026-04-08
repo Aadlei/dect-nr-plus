@@ -46,7 +46,7 @@ struct SYNC_data
 };
 
 // CHANGE THIS BASED ON DEVICE TYPE
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 
 #define DECT_SINK_LONG_RD_ID 			0x67214200U
 #define DECT_PT_LONG_RD_ID				0x11223344U // Change this for each PT
@@ -85,7 +85,6 @@ K_SEM_DEFINE(sem_deactivate, 0, 1);
 K_SEM_DEFINE(sem_network_created, 0, 1); // For FT
 K_SEM_DEFINE(sem_network_joined, 0, 1); // For PT
 K_SEM_DEFINE(sem_association_created, 0, 1);
-
 // Network management callback 
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
@@ -754,6 +753,9 @@ static void write_ft_settings(void)
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
 
+	// Create the device IPv6 address
+	create_and_set_device_ipv6();
+
 	LOG_INF("DECT sink FT settings successfully set");
 }
 
@@ -787,6 +789,9 @@ static void write_pt_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+
+	// Create the device IPv6 address
+	create_and_set_device_ipv6();
 
 	LOG_INF("DECT PT settings successfully set");
 }
@@ -859,8 +864,6 @@ static void run_as_ft(void)
 {
 	LOG_WRN("Starting as FT");
 
-	create_and_set_device_ipv6();
-
 	int ret = net_mgmt(NET_REQUEST_DECT_NETWORK_CREATE, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Created
 	if (ret == -EALREADY)
 	{
@@ -901,8 +904,6 @@ static void run_as_ft(void)
 static void run_as_pt(void)
 {
 	LOG_WRN("Starting as PT");
-
-	create_and_set_device_ipv6();
 
 	start_network_scan();
 
@@ -1165,7 +1166,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 int main(void)
 {
-	int err;
+	int ret;
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 
@@ -1206,14 +1207,14 @@ int main(void)
 
 #if defined(CONFIG_DK_LIBRARY)
 	// Initialize DK library for buttons and LEDs 
-	err = dk_buttons_init(button_handler);
-	if (err) {
-		LOG_WRN("Failed to initialize buttons: %d", err);
+	ret = dk_buttons_init(button_handler);
+	if (ret) {
+		LOG_WRN("Failed to initialize buttons: %d", ret);
 	}
 
-	err = dk_leds_init();
-	if (err) {
-		LOG_WRN("Failed to initialize LEDs: %d", err);
+	ret = dk_leds_init();
+	if (ret) {
+		LOG_WRN("Failed to initialize LEDs: %d", ret);
 	} else {
 		// Initialize LEDs to OFF state 
 		dk_set_led_off(DK_LED1);
@@ -1223,64 +1224,31 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
-	// Initialize modem library and this triggers DECT NR+ stack initialization
-#if defined(CONFIG_NRF_MODEM_LIB)
-	err = nrf_modem_lib_init();
-	if (err) {
-		LOG_ERR("Failed to initialize modem library: %d", err);
-		return err;
-	}
-#endif
-
-	// Block until DECT is activated
-	LOG_INF("Wait for DECT stack to activate...");
-	k_sem_take(&sem_activate, K_FOREVER);
-
-	err = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
-	if (err)
-	{
-		LOG_ERR("Failed to deactivate DECT stack: %d", err);
-	}
-
-	// Block until deactivated
-	LOG_INF("Wait for DECT stack to deactivate...");
-	k_sem_take(&sem_deactivate, K_FOREVER);
-
 	// Write settings
 	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
 	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
 
-	// Activate stack again
-	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
-	if (err)
-	{
-		LOG_ERR("Failed to activate DECT stack: %d", err);
+	// Initialize modem library and this triggers DECT NR+ stack initialization
+#if defined(CONFIG_NRF_MODEM_LIB)
+	ret = nrf_modem_lib_init();
+	if (ret) {
+		LOG_ERR("Failed to initialize modem library: %d", ret);
+		return ret;
 	}
+#endif
 
+	// Block until DECT is activated
+	LOG_INF("Wait for DECT stack to activate and settings to write...");
 	k_sem_take(&sem_activate, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
 
-	/* --- Sink FT and regular PT specific --- */
+	// --- Sink FT and regular PT specific ---
 
-	// FT:
-	// 1. Network start
-	// 2. Network beacon start
-	// 3. Cluster start
-	// 4. Cluster beacon start
-	// 5. Start RX thread
-
-	// PT:
-	// 1. Network scan and join
-	// 2. Cluster scan and join
-	// 3. Start TX messages every 30 seconds
-
-	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT (sink)
+	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
 		run_as_ft();
-	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT (edge)
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT
 		run_as_pt();
-	else // Other combination
-		LOG_ERR("Unhandled device type combination");
 
 	while(1)
 		k_sleep(K_SECONDS(1));
