@@ -51,7 +51,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
@@ -502,13 +502,6 @@ static int SYNC_ft_operation(void)
 		.sin6_port = htons(SOCKET_COMMON_PORT)
 	};
 	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
-
-	// Sink address
-	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
-	#else
-    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_FT_LONG_RD_ID);
-	#endif
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
@@ -924,7 +917,7 @@ static void run_as_ft(void)
 		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
 	}
 
-	k_sleep(K_SECONDS(20));
+	k_sleep(K_SECONDS(20));	// TODO: Temp, remove this
 
 	ret = uart_data_init();
 	if (ret)
@@ -1037,8 +1030,6 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Close sockets
 		close_sockets();
-
-		main_mac_stop_udp_listener();
 
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 		k_work_cancel_delayable(&tx_work);
@@ -1294,30 +1285,6 @@ int main(void)
 
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate and settings to write...");
-	LOG_INF("Wait for DECT stack to activate...");
-	k_sem_take(&sem_activate, K_FOREVER);
-
-	err = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
-	if (err)
-	{
-		LOG_ERR("Failed to deactivate DECT stack: %d", err);
-	}
-
-	// Block until deactivated
-	LOG_INF("Wait for DECT stack to deactivate...");
-	k_sem_take(&sem_deactivate, K_FOREVER);
-
-	// Write settings
-	if (current_device_type == DECT_DEVICE_TYPE_FT) write_ft_settings();
-	else if(current_device_type == DECT_DEVICE_TYPE_PT) write_pt_settings();
-
-	// Activate stack again
-	err = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
-	if (err)
-	{
-		LOG_ERR("Failed to activate DECT stack: %d", err);
-	}
-
 	k_sem_take(&sem_activate, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
@@ -1327,17 +1294,7 @@ int main(void)
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
 		run_as_ft();
 	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT
-	// PT:
-	// 1. Network scan and join
-	// 2. Cluster scan and join
-	// 3. Start Tx messages every 30 seconds
-
-	if (current_device_type == DECT_DEVICE_TYPE_FT)
-    	run_as_ft();
-	else if (current_device_type == DECT_DEVICE_TYPE_PT)
 		run_as_pt();
-	else
-		LOG_ERR("Unhandled device type combination");
 
 	while(1)
 		k_sleep(K_SECONDS(1));
