@@ -20,6 +20,22 @@ config DECT_TRANSMITTER_ID
 	help
 	  DECT NR+ Transmitter ID (long rd id). Range 0..65535
 
+config DECT_RELAY_PT
+	bool "DECT NR+ Relay PT"
+	default n
+	help
+	  Enable DECT NR+ Relay PT functionality. If enabled, the device will act as a relay for DECT NR+ messages.
+
+config DECT_RELAY_FT
+	bool "DECT NR+ Relay FT"
+	default n
+	help
+	  Enable DECT NR+ Relay FT functionality. If enabled, the device will act as a relay for DECT NR+ messages.
+
+config SPI
+	depends on !DECT_RELAY_PT && !DECT_RELAY_FT
+
+
 module = HELLO_DECT_MAC
 module-str = Log level for Hello DECT sample application
 source "${ZEPHYR_BASE}/subsys/logging/Kconfig.template.log_config"

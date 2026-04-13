@@ -52,7 +52,7 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
             mqtt_client = None
 
     try:
-        ser = serial.Serial(port, baudrate, timeout=0.1)
+        ser = serial.Serial(port, baudrate, timeout=0.5)
     except serial.SerialException as e:
         print(f"Error: {e}")
         print(f"Make sure {port} is not already open.")
@@ -71,6 +71,7 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
             chunk = ser.read(4096)
             if not chunk:
                 continue
+            print(f"[DBG] got {len(chunk)} bytes: {chunk[:20].hex()}")
             buf += chunk
 
             while True:
@@ -150,7 +151,7 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
 def main():
     parser = argparse.ArgumentParser(
         description="Receive images from nRF9151 DK and publish via MQTT")
-    parser.add_argument("--port", default="COM3",
+    parser.add_argument("--port", default="COM7",
                         help="Serial port (default: COM7)")
     parser.add_argument("--baud", type=int, default=1000000,
                         help="Baud rate (default: 1000000)")
