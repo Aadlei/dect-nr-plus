@@ -1,0 +1,97 @@
+@startuml
+hide empty description
+
+'state "<b>TEMP</b>" as TEMP: <i>TEMP</i>'
+
+'State setup'
+state "<b>DECT Setup</b>" as Setup: <i>Setup of device and DECT network interface</i>
+state Setup {
+  state "Event callbacks" as Callbacks
+  state "DECT interface creation" as Interface
+  state "FT settings write" as FT_Settings
+  state "PT settings write" as PT_Settings
+  state "DECT stack/modem init" as Stack
+  state "Open TX/RX sockets" as Sockets
+
+  Callbacks --> Interface
+  Interface --> FT_Settings: FT mode
+  Interface --> PT_Settings: PT mode
+  FT_Settings --> Stack
+  PT_Settings --> Stack
+  Stack --> Sockets
+}
+
+'States PT'
+state "<b>Network scan</b>" as PT_Scan: <i>Start scan for available networks for <b>x</b> seconds</i>
+state "<b>Neighbors update</b>" as Neighbor: <i>Update neighbor lists</i>
+state "<b>Association request</b>" as Assoc_Req: <i>Send association request to FT and wait for response for <b>x</b> seconds</i>
+state "<b>SYNC PT</b>" as SYNC_PT: <i>Start SYNC process as PT</i>
+state SYNC_PT {
+  state "SYNC TX" as SYNC_PT_TX
+  state "SYNC RX" as SYNC_PT_RX
+  state "Offset stored" as SYNC_PT_OFFSET
+
+  [*] --> SYNC_PT_TX
+  SYNC_PT_TX --> SYNC_PT_TX: TX\nfailed
+  SYNC_PT_TX --> SYNC_PT_RX: TX\nsuccess
+  SYNC_PT_RX --> SYNC_PT_TX: RX\nfailed
+  SYNC_PT_RX --> SYNC_PT_TX: Timeout
+  SYNC_PT_RX --> SYNC_PT_OFFSET: RX\nsuccess
+  SYNC_PT_OFFSET --> [*]
+}
+state "<b>Image TX work</b>" as PT_TX: <i>Transmit image data to FT every <b>x</b> seconds</i>
+
+'States FT'
+state "<b>Channel scan</b>" as FT_Scan: <i>Scan all channels in band</i>
+state "<b>Network beacon</b>" as Beacon: <i>Start network beacon at channel <b>x</b></i>
+state "<b>Association wait</b>" as Assoc_Wait: <i>Listen for association requests</i>
+state "<b>Association response</b>" as Assoc_Resp: <i>Send association response to PT</i>
+state "<b>SYNC FT</b>" as SYNC_FT: <i>Start SYNC process as FT</i>
+state SYNC_FT {
+  state "SYNC RX" as SYNC_FT_RX
+  state "SYNC TX" as SYNC_FT_TX
+
+  [*] --> SYNC_FT_RX
+  SYNC_FT_RX --> SYNC_FT_RX: Timeout
+  SYNC_FT_RX --> SYNC_FT_RX: RX\nfailed
+  SYNC_FT_RX --> SYNC_FT_TX: RX\nsuccess
+  SYNC_FT_TX --> SYNC_FT_RX: TX\nfailed
+  SYNC_FT_TX --> [*]: TX\nsuccess
+}
+state "<b>Image RX work</b>" as FT_RX: <i>Receive image data</i>
+
+'State entry'
+[*] --> Setup
+Setup --> Setup: Setup\nfailed
+
+'State transitions FT'
+FT_RX --> FT_Scan: No\nassociations
+Setup --> FT_RX: FT setup\nsuccess
+FT_Scan --> Beacon: Best\nchannel <b>x</b>
+Beacon --> Assoc_Wait: Beacon\nsuccess
+Assoc_Wait --> FT_Scan: Timeout
+Assoc_Wait --> Assoc_Wait: Association\nfailed
+Assoc_Wait --> Assoc_Resp: PT\nrequest
+Assoc_Wait --> FT_RX
+FT_RX --> Assoc_Wait: Existing\nassociations
+Assoc_Resp --> SYNC_FT: Association\nsuccess
+Assoc_Resp --> Assoc_Wait: Association\nfailed
+SYNC_FT --> Assoc_Wait: Association\nbroken
+SYNC_FT --> Assoc_Wait: SYNC\nsuccess
+
+'State transitions PT'
+Setup --> PT_Scan: PT setup\nsuccess
+PT_Scan --> PT_Scan: Timeout\n(None found)
+PT_Scan --> Neighbor: Timeout\n(FTs found)
+Neighbor --> Assoc_Req: Best\nFT
+Assoc_Req --> SYNC_PT: Association\nsuccess
+Assoc_Req --> PT_Scan: Association\nfailed
+Assoc_Req --> PT_Scan: Timeout
+SYNC_PT --> PT_Scan: Association\nbroken
+SYNC_PT --> PT_Scan: Timeout
+SYNC_PT --> PT_TX: SYNC\nsuccess
+PT_TX --> PT_Scan: Association\nbroken
+
+'State exit'
+
+@enduml
