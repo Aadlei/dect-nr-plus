@@ -1,0 +1,64 @@
+@startuml
+hide empty description
+
+'state "<b>TEMP</b>" as TEMP: <i>TEMP</i>'
+state Common: <i>Resources across threads</i>
+state Common: \n- TX socket
+state Common: - RX socket
+state Common: - UART queue buffer
+state "<b>Common resources</b>" as Common
+
+'Main thread'
+state "<b>Thread main</b>" as Main
+state "<b>Setup</b>" as Setup: <i>DECT, device and main setup</i>
+state Setup {
+  state "<b>Open sockets</b>" as Sockets: <i>Open TX and RX sockets</i>
+  state "<b>Start FT thread</b>" as Thread_FT
+  state "<b>Start UART thread</b>" as Thread_UART
+
+  Sockets --> Thread_FT
+  Thread_FT --> Thread_UART
+}
+
+state "<b>RX idle</b>" as RX_Idle: <i>Listen for data on RX socket</i>
+state "<b>UART queue</b>" as RX_Img: <i>Queue data to send on UART</i>
+
+Main --> Setup
+Setup --> RX_Idle
+RX_Idle --> RX_Img: Image data\nreceived
+RX_Img --> RX_Idle
+
+'FT thread'
+state "<b>Thread FT</b>" as FT
+state "<b>Channel scan</b>" as FT_Scan: <i>Scan over all channels in band</i>
+state "<b>Network beacon</b>" as FT_Beacon: <i>Start network beacon on channel <b>x</b>
+state "<b>Association idle" as FT_Assoc_Idle: <i>Wait for association request from PT</i>
+state "<b>Association response</b>" as FT_Assoc_Resp: <i>Accept association with PT</i>
+state "<b>Association drop</b>" as FT_Assoc_Drop: <i>Drop association with PT</i>
+state "<b>SYNC FT" as FT_Sync: <i>Start SYNC process as FT</i>
+
+FT --> FT_Scan
+FT_Scan --> FT_Beacon: Best\nchannel <b>x</b>
+FT_Beacon --> FT_Assoc_Idle: Beacon\nsuccess
+FT_Assoc_Idle --> FT_Beacon: Timeout
+FT_Assoc_Idle --> FT_Assoc_Resp: Incoming\nrequest
+FT_Assoc_Resp --> FT_Assoc_Idle: Association\nfailed
+FT_Assoc_Resp --> FT_Sync: Association\nsuccess
+FT_Sync --> FT_Assoc_Idle: SYNC\nsuccess
+FT_Sync --> FT_Sync: Timeout (<b>n</b> retries)
+FT_Sync --> FT_Assoc_Drop: SYNC\nfail
+FT_Assoc_Drop --> FT_Assoc_Idle
+
+'UART thread'
+state "<b>Thread UART" as UART
+state "<b>UART init</b>" as UART_Init: <i>Initialize UART connection</i>
+state "<b>UART idle</b>" as UART_Idle: <i>Wait for data to send over UART</i>
+state "<b>UART send</b>" as UART_Send: <i>Send queued data over UART</i>
+
+UART --> UART_Init
+UART_Init --> UART_Idle
+UART_Idle --> UART_Send: Non-empty\nqueue
+UART_Send --> UART_Send: Non-empty\nqueue
+UART_Send --> UART_Idle: Empty\nqueue
+
+@enduml
