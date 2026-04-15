@@ -1,0 +1,69 @@
+@startuml
+hide empty description
+
+'state "<b>TEMP</b>" as TEMP: <i>TEMP</i>'
+state Common: <i>Resources across threads</i>
+state Common: \n- TX socket
+state Common: - RX socket
+state Common: - UART queue buffer
+state Common: - SPI data buffer
+state Common: - DECT parent status
+state Common: - DECT children status
+state "<b>Common resources</b>" as Common
+
+'Main thread'
+state "<b>Thread main</b>" as Main
+state "<b>Setup</b>" as Main_Setup: <i>DECT, device and main setup</i>
+state Main_Setup {
+  state "<b>Open sockets</b>" as Main_Sockets: <i>Open TX and RX sockets</i>
+  state "<b>Start PT thread</b>" as Main_Thread_PT
+  state "<b>Start SPI thread</b>" as Main_Thread_SPI
+
+  Main_Sockets --> Main_Thread_PT: None
+  Main_Thread_PT --> Main_Thread_SPI: None
+}
+state "<b>Main idle</b>" as Main_Idle: <i>Wait for association with FT</i>
+state "<b>SPI wait</b>" as Main_SPI_Idle: <i>Listen on SPI for new image data</i>
+state "<b>TX data</b>" as Main_TX: <i>Send data on TX socket</i>
+
+Main --> Main_Setup: None
+Main_Setup --> Main_Idle: None
+Main_Idle --> Main_SPI_Idle: Association\ncreated
+Main_SPI_Idle --> Main_Idle: Association\ndropped
+Main_SPI_Idle --> Main_TX: SPI buffer\nupdated
+Main_TX --> Main_SPI_Idle: None
+
+'PT thread'
+state "<b>Thread PT</b>" as PT
+state "<b>Network scan</b>" as PT_Assoc_Scan: <i>Start scan for available networks for <b>x</b> seconds</i>
+state "<b>Retrieve best neighbor</b>" as PT_Assoc_Nbr: <i>Retrieve best FT from neighbor list</i>
+state "<b>Association request</b>" as PT_Assoc_Req: <i>Send association request to FT</i>
+state "<b>SYNC PT</b>" as PT_SYNC: <i>Start SYNC process as PT</i>
+state "<b>Association drop</b>" as PT_Assoc_Drop: <i>Drop association with FT</i>
+state "<b>Association idle</b>" as PT_Assoc_Idle: <i>Wait for dropped association</i>
+
+PT --> PT_Assoc_Scan: None
+PT_Assoc_Scan --> PT_Assoc_Nbr: FTs\nfound
+PT_Assoc_Scan --> PT_Assoc_Scan: No FTs\n found
+PT_Assoc_Nbr --> PT_Assoc_Req: Best FT
+PT_Assoc_Nbr --> PT_Assoc_Scan: No FT
+PT_Assoc_Req --> PT_SYNC: Association\nsuccess
+PT_Assoc_Req --> PT_Assoc_Scan: Association\nfailed
+PT_SYNC --> PT_Assoc_Idle: SYNC\nsuccess
+PT_SYNC --> PT_SYNC: Timeout\n(<b>n</b> retries)
+PT_SYNC --> PT_Assoc_Drop: SYNC\nfail
+PT_Assoc_Drop --> PT_Assoc_Scan: None
+PT_Assoc_Idle --> PT_Assoc_Scan: Association\ndropped
+
+'SPI thread'
+state "<b>Thread SPI" as SPI
+state "<b>SPI init</b>" as SPI_Init: <i>Initialize SPI connection</i>
+state "<b>SPI idle</b>" as SPI_Idle: <i>Wait for receive data on SPI (MISO)</i>
+state "<b>SPI update</b>" as SPI_Update: <i>Update buffer with new data</i>
+
+SPI --> SPI_Init: None
+SPI_Init --> SPI_Idle: None
+SPI_Idle --> SPI_Update: New\nMISO data
+SPI_Update --> SPI_Idle: None
+
+@enduml
