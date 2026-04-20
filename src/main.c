@@ -406,7 +406,7 @@ static int SYNC_pt_operation(void)
 		}
 		else
 		{
-			LOG_WRN("Long RD ID not matching. Retrying RX...");
+			LOG_WRN("Long RD ID not matching. Got 0x%08x, but expected 0x%08x. Retrying RX...", rx_long_rd_id, parent_long_rd_id);
 		}
 	}
 
@@ -485,7 +485,7 @@ static int SYNC_ft_operation(void)
 		}
 		else
 		{
-			LOG_WRN("Long RD ID not matching. Retrying RX...");
+			LOG_WRN("Long RD ID not matching. Got 0x%08x, but got 0x%08x. Retrying RX...", rx_long_rd_id, child_long_rd_id);
 		}
 	}
 
@@ -955,7 +955,7 @@ static void run_as_pt(void)
 	while (success < 0)
 	{
 		success = SYNC_pt_operation();
-		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
+		k_sleep(K_SECONDS(10)); // Do SYNC operation and sleep retry
 	}
 
 	k_sleep(K_SECONDS(20)); // Temp because SPI thread is buggy
