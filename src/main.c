@@ -889,6 +889,20 @@ static void join_network(uint32_t long_rd_id)
 	}
 }
 
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static void main_tx_image_message(const uint8_t *data, size_t size)
+{
+    uint32_t parent_long_rd_id = get_parent_long_rd_id();
+    if (parent_long_rd_id == 0) {
+        LOG_ERR("No parent RD ID, dropping relayed image");
+        return;
+    }
+
+    LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", size, parent_long_rd_id);
+    tx_img_data(data, size, parent_long_rd_id);
+}
+#endif
+
 static void run_as_ft(void)
 {
 	LOG_WRN("Starting as FT");
@@ -1134,20 +1148,26 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		break;
 
     case NET_EVENT_DECT_SCAN_RESULT:
-        const struct dect_scan_result_evt *result = cb->info;
-		const struct dect_route_info *sink_result = &result->route_info;
-		#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-			// Relay PT must join sink FT directly, ignore relay FT
-			if (result->transmitter_long_rd_id != DECT_SINK_LONG_RD_ID) {
-				LOG_INF("Ignoring non-sink FT 0x%08x", result->transmitter_long_rd_id);
-				break;
-			}
-		#endif
-		// TODO: When route cost is included, make decision here
-		best_long_rd_id = result->transmitter_long_rd_id;
-		best_route_cost = sink_result->route_cost;
+		const struct dect_scan_result_evt *result = cb->info;
+		const struct dect_route_info *route = &result->route_info;
 
-        break;
+		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
+					result->transmitter_long_rd_id);
+			break;
+		}
+		#endif
+
+		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
+				result->transmitter_long_rd_id, route->route_cost);
+
+		if (route->route_cost < best_route_cost) {
+			best_route_cost = route->route_cost;
+			best_long_rd_id = result->transmitter_long_rd_id;
+		}
+		break;
 
 	case NET_EVENT_DECT_SCAN_DONE:
 		if (best_long_rd_id != 0)
