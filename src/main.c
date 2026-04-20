@@ -352,13 +352,15 @@ static int SYNC_pt_operation(void)
 	}
 	else LOG_INF("SYNC packet sent");
 
-	// Wait for interface to go up and RX socket open
-	LOG_INF("Waiting for RX socket to open...");
-	k_sem_take(&sem_if_up, K_MSEC(SYNC_TIMEOUT * 3));
-
 	struct sockaddr_in6 src_addr;
 	socklen_t addr_len = sizeof(src_addr);
 	char addr_str[NET_IPV6_ADDR_LEN];
+
+	if (rx_socket < 0)
+	{
+		LOG_WRN("RX socket not open");
+		return -1;
+	}
 
 	uint32_t timer_start = k_uptime_get_32();
 
@@ -366,43 +368,32 @@ static int SYNC_pt_operation(void)
 	{
 		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
 		{
-			LOG_WRN("SYNC timeout");
-			return -1;
-		}
-
-		if (rx_socket < 0)
-		{
-			LOG_WRN("RX socket not open");
+			LOG_WRN("SYNC timeout. Exiting RX...");
 			return -1;
 		}
 
 		struct SYNC_data rx_from_parent;
 
 		// Timestamp and RX
-		uint32_t T_temp_before = k_uptime_get_32();
 		ret = recvfrom(rx_socket, &rx_from_parent, sizeof(rx_from_parent), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp_after = k_uptime_get_32();
+		uint32_t T_temp = k_uptime_get_32();
 
-		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+		if (ret < 0)
+		{
+			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
+		}
 
 		// Check if packet is correct
 		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
-			LOG_WRN("Packet signature not matching for SYNC packet");
-			return -1;
-		}
-
-		if (ret < 0)
-		{
-			LOG_WRN("RX failed: %d", errno);
-			return -1;
+			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
 		}
 
 		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Received %d bytes from %s", ret, addr_str);
-
 		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+		LOG_INF("Received SYNC packet, %d bytes from IPv6=%s (long_rd_id=0x%08x)", ret, addr_str, rx_long_rd_id);
 
 		if (rx_long_rd_id == parent_long_rd_id)
 		{
@@ -415,8 +406,7 @@ static int SYNC_pt_operation(void)
 		}
 		else
 		{
-			LOG_WRN("Long RD ID not matching");
-			return -1;
+			LOG_WRN("Long RD ID not matching. Retrying RX...");
 		}
 	}
 
@@ -446,40 +436,44 @@ static int SYNC_ft_operation(void)
 	socklen_t addr_len = sizeof(src_addr);
 	char addr_str[NET_IPV6_ADDR_LEN];
 
+	if (rx_socket < 0)
+	{
+		LOG_WRN("RX socket not open");
+		return -1;
+	}
+
+	uint32_t timer_start = k_uptime_get_32();
+
 	while (1)
 	{
-		if (rx_socket < 0)
+		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
 		{
-			LOG_WRN("RX socket not open");
+			LOG_WRN("SYNC timeout. Exiting RX...");
 			return -1;
 		}
-
+		
 		struct SYNC_data rx_from_child;
 
 		// Timestamp and RX
-		uint32_t T_temp_before = k_uptime_get_32();
 		ret = recvfrom(rx_socket, &rx_from_child, sizeof(rx_from_child), 0,
 				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp_after = k_uptime_get_32();
-		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
+		uint32_t T_temp = k_uptime_get_32();
+
+		if (ret < 0)
+		{
+			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
+		}
 
 		// Check if packet is correct
 		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
-			LOG_WRN("Packet signature not matching for SYNC packet");
-			return -1;
-		}
-
-		if (ret < 0)
-		{
-			LOG_WRN("RX failed: %d", errno);
-			return -1;
+			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
 		}
 
 		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Received %d bytes from %s", ret, addr_str);
-
 		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
+
+		LOG_INF("Received SYNC packet, %d bytes from IPv6=%s (long_rd_id=0x%08x)", ret, addr_str, rx_long_rd_id);
 
 		if (rx_long_rd_id == child_long_rd_id)
 		{
@@ -491,8 +485,7 @@ static int SYNC_ft_operation(void)
 		}
 		else
 		{
-			LOG_WRN("Long RD ID not matching");
-			return -1;
+			LOG_WRN("Long RD ID not matching. Retrying RX...");
 		}
 	}
 
@@ -1150,7 +1143,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_DECT_SCAN_RESULT:
 		const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *route = &result->route_info;
-
+/*
 		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
@@ -1158,7 +1151,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 					result->transmitter_long_rd_id);
 			break;
 		}
-		#endif
+		#endif*/
 
 		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
 				result->transmitter_long_rd_id, route->route_cost);
@@ -1309,7 +1302,6 @@ int main(void)
 	LOG_INF("Hello DECT application started successfully");
 
 	// --- Sink FT and regular PT specific ---
-
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
 		run_as_ft();
 	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT
