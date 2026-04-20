@@ -11,6 +11,9 @@ project(hello_dect)
 
 target_sources(app PRIVATE
     src/main.c
-    src/spi.c
     src/uart.c
 )
+
+if(NOT CONFIG_DECT_RELAY_PT AND NOT CONFIG_DECT_RELAY_FT)
+    target_sources(app PRIVATE src/spi.c)
+endif()

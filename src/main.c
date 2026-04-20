@@ -46,10 +46,25 @@ struct SYNC_data
 };
 
 // CHANGE THIS BASED ON DEVICE TYPE
+<<<<<<< HEAD
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 
 #define DECT_SINK_LONG_RD_ID 			0x67214200U
 #define DECT_PT_LONG_RD_ID				0x11223344U // Change this for each PT
+=======
+#if defined(CONFIG_DECT_RELAY_FT)
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+#elif defined(CONFIG_DECT_RELAY_PT)
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+#else
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+#endif
+
+#define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
+#define DECT_FT_LONG_RD_ID 			0x12345678U // Change this for each FT
+#define DECT_SINK_LONG_RD_ID 		0x67214200U
+#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
+>>>>>>> origin/physical-relay
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SOCKET_COMMON_PORT 				12345
@@ -131,7 +146,12 @@ static void join_network(uint32_t long_rd_id);
 static void run_as_ft(void);
 static void run_as_pt(void);
 
+<<<<<<< HEAD
 // TX work
+=======
+// Tx work for SPI
+#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+>>>>>>> origin/physical-relay
 static void check_spi_image_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
 static void check_spi_image_work_handler(struct k_work *work)
@@ -175,6 +195,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
 	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 }
+#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 
 // LED 2 turn-off work
 #if defined(CONFIG_DK_LIBRARY)
@@ -323,6 +344,7 @@ static int SYNC_pt_operation(void)
 		return -1;
 	}
 
+<<<<<<< HEAD
 	// Timestamp and TX
 	if (tx_socket < 0)
 	{
@@ -492,6 +514,14 @@ static int SYNC_ft_operation(void)
 		.sin6_port = htons(SOCKET_COMMON_PORT)
 	};
 	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
+=======
+	// Sink address
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_SINK_LONG_RD_ID);
+	#else
+    bool ok = create_ipv6_from_long_rd_id(&sock_addr.sin6_addr, DECT_FT_LONG_RD_ID);
+	#endif
+>>>>>>> origin/physical-relay
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address");
@@ -609,6 +639,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		}
 
 		packet->packet_idx = i;
+		packet->total_data_size = image_size;
 		packet->total_packets = total_chunks;
 		packet->payload_len = payload_len;
 
@@ -730,7 +761,12 @@ static void write_ft_settings(void)
 
 	// Device type and long rd id
 	dev_settings.device_type = current_device_type;
-	dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	dev_settings.device_type = current_device_type;
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	#endif
 
 	// Network beacon
 	// TODO: Fix from magic numbers
@@ -752,10 +788,18 @@ static void write_ft_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+<<<<<<< HEAD
 
 	// Create the device IPv6 address
 	create_and_set_device_ipv6();
 
+=======
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
+	#endif
+>>>>>>> origin/physical-relay
 	LOG_INF("DECT sink FT settings successfully set");
 }
 
@@ -773,7 +817,11 @@ static void write_pt_settings(void)
 
 	// Device type and long RD ID
 	dev_settings.device_type = current_device_type;
-	dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
+	#endif
 
 	// Write bitmap
 	dev_settings.cmd_params.write_scope_bitmap = 
@@ -789,10 +837,18 @@ static void write_pt_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
+<<<<<<< HEAD
 
 	// Create the device IPv6 address
 	create_and_set_device_ipv6();
 
+=======
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
+	#else
+		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
+	#endif
+>>>>>>> origin/physical-relay
 	LOG_INF("DECT PT settings successfully set");
 }
 
@@ -896,9 +952,13 @@ static void run_as_ft(void)
 		LOG_ERR("Failed to initialize UART: %d", ret);
 		return;
 	}
+<<<<<<< HEAD
 
 	uart_tx_thread_start();
 	rx_thread();
+=======
+	main_mac_rx_thread();
+>>>>>>> origin/physical-relay
 }
 
 static void run_as_pt(void)
@@ -915,6 +975,7 @@ static void run_as_pt(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
+<<<<<<< HEAD
 	// Start SYNC tx
 	int success = SYNC_pt_operation();
 	while (success < 0) 
@@ -925,6 +986,17 @@ static void run_as_pt(void)
 
 	k_sleep(K_SECONDS(20)); // Temp because SPI thread is buggy
 
+=======
+	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    uart_rx_set_frame_callback(main_tx_image_message);  
+    int ret = uart_data_init();
+    if (ret) {
+        LOG_ERR("Failed to initialize UART RX: %d", ret);
+        return;
+    }
+
+	#elif !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+>>>>>>> origin/physical-relay
 	// SPI slave start
 	int ret = spi_slave_init();
 	if (ret)
@@ -938,9 +1010,9 @@ static void run_as_pt(void)
 		LOG_ERR("Failed to start SPI slave thread: %d", ret);
 		return;
 	}
-
-	spi_slave_start_thread();
+	
 	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
+	#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 }
 
 static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
@@ -989,11 +1061,18 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		dect_connected = false;
 		nw_beacon_started = false;
 		message_counter = 0;
+<<<<<<< HEAD
 
 		// Close sockets
 		close_sockets();
 
+=======
+		main_mac_stop_udp_listener();
+
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+>>>>>>> origin/physical-relay
 		k_work_cancel_delayable(&tx_work);
+		#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn off LED 1 to indicate disconnection 
@@ -1097,7 +1176,13 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_DECT_SCAN_RESULT:
         const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *sink_result = &result->route_info;
-
+		#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+			// Relay PT must join sink FT directly, ignore relay FT
+			if (result->transmitter_long_rd_id != DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Ignoring non-sink FT 0x%08x", result->transmitter_long_rd_id);
+				break;
+			}
+		#endif
 		// TODO: When route cost is included, make decision here
 		best_long_rd_id = result->transmitter_long_rd_id;
 		best_route_cost = sink_result->route_cost;
@@ -1225,8 +1310,8 @@ int main(void)
 #endif
 
 	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
-	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
+	if (current_device_type == DECT_DEVICE_TYPE_FT) write_ft_settings();
+	else if(current_device_type == DECT_DEVICE_TYPE_PT) write_pt_settings();
 
 	// Initialize modem library and this triggers DECT NR+ stack initialization
 #if defined(CONFIG_NRF_MODEM_LIB)
@@ -1245,10 +1330,31 @@ int main(void)
 
 	// --- Sink FT and regular PT specific ---
 
+<<<<<<< HEAD
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
 		run_as_ft();
 	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT
 		run_as_pt();
+=======
+	// FT:
+	// 1. Network start
+	// 2. Network beacon start
+	// 3. Cluster start
+	// 4. Cluster beacon start
+	// 5. Start Rx thread
+
+	// PT:
+	// 1. Network scan and join
+	// 2. Cluster scan and join
+	// 3. Start Tx messages every 30 seconds
+
+	if (current_device_type == DECT_DEVICE_TYPE_FT)
+    	run_as_ft();
+	else if (current_device_type == DECT_DEVICE_TYPE_PT)
+		run_as_pt();
+	else
+		LOG_ERR("Unhandled device type combination");
+>>>>>>> origin/physical-relay
 
 	while(1)
 		k_sleep(K_SECONDS(1));

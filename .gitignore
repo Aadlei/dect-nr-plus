@@ -6,6 +6,14 @@
 # build
 *build/
 build/
+*FT/
+FT/
+*PT/
+PT/
+*FT_SINK/
+FT_SINK/
+*PT_EDGE/
+PT_EDGE/
 
 # JetBrains
 .idea/
