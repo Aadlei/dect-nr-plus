@@ -54,16 +54,16 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
-#define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
-#define DECT_FT_LONG_RD_ID 			0x12345678U // Change this for each FT
-#define DECT_SINK_LONG_RD_ID 		0x67214200U
-#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
+#define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
+#define DECT_FT_LONG_RD_ID 				0x12345678U // Change this for each FT
+#define DECT_SINK_LONG_RD_ID 			0x67214200U
+#define DECT_PT_LONG_RD_ID				0x11223344U // Change this for each PT
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SOCKET_COMMON_PORT 				12345
 #define MESH_PREFIX_STR 				"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 				2000
-#define SOCKET_RX_TIMEOUT_SEC 			5
+#define SOCKET_RX_TIMEOUT_SEC 			10
 #define SYNC_TIMEOUT					5000
 #define WORK_RESCHEDULE_TIME_SEC 		10
 
@@ -362,16 +362,8 @@ static int SYNC_pt_operation(void)
 		return -1;
 	}
 
-	uint32_t timer_start = k_uptime_get_32();
-
 	while (1)
 	{
-		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
-		{
-			LOG_WRN("SYNC timeout. Exiting RX...");
-			return -1;
-		}
-
 		struct SYNC_data rx_from_parent;
 
 		// Timestamp and RX
@@ -379,15 +371,23 @@ static int SYNC_pt_operation(void)
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp = k_uptime_get_32();
 
-		if (ret < 0)
+		if (ret < 0) // Handle whatever errors
 		{
+			if (errno == EAGAIN) // Socket timeout
+			{
+				LOG_WRN("RX socket timeout (errno=%d). Retrying RX...", errno);
+				continue;
+			}
+
 			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
+			continue;
 		}
 
 		// Check if packet is correct
 		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
 			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
+			continue;
 		}
 
 		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
@@ -407,6 +407,7 @@ static int SYNC_pt_operation(void)
 		else
 		{
 			LOG_WRN("Long RD ID not matching. Got 0x%08x, but expected 0x%08x. Retrying RX...", rx_long_rd_id, parent_long_rd_id);
+			continue;
 		}
 	}
 
@@ -442,16 +443,8 @@ static int SYNC_ft_operation(void)
 		return -1;
 	}
 
-	uint32_t timer_start = k_uptime_get_32();
-
 	while (1)
 	{
-		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
-		{
-			LOG_WRN("SYNC timeout. Exiting RX...");
-			return -1;
-		}
-		
 		struct SYNC_data rx_from_child;
 
 		// Timestamp and RX
@@ -459,15 +452,23 @@ static int SYNC_ft_operation(void)
 				(struct sockaddr *)&src_addr, &addr_len);
 		uint32_t T_temp = k_uptime_get_32();
 
-		if (ret < 0)
+		if (ret < 0) // Handle whatever socket errors 
 		{
+			if (errno == EAGAIN) // Socket timeout
+			{
+				LOG_WRN("RX socket timeout (errno=%d). Retrying RX...", errno);
+				continue;
+			}
+
 			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
+			continue;
 		}
 
 		// Check if packet is correct
 		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
 		{
 			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
+			continue;
 		}
 
 		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
@@ -486,6 +487,7 @@ static int SYNC_ft_operation(void)
 		else
 		{
 			LOG_WRN("Long RD ID not matching. Got 0x%08x, but got 0x%08x. Retrying RX...", rx_long_rd_id, child_long_rd_id);
+			continue;
 		}
 	}
 
