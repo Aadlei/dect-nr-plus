@@ -13,19 +13,18 @@ state "<b>Common resources</b>" as Common
 state "<b>Thread main</b>" as Main
 state "<b>Setup</b>" as Main_Setup: <i>DECT, device and main setup</i>
 state Main_Setup {
-  state "<b>UART init</b>" as Main_UART_Init: <i>Initialize UART connection</i>
+  state "<b>Start UART thread</b>" as Main_Thread_UART
   state "<b>R-SYNC</b>" as Main_RSYNC: <i>Start Relay-SYNC process as FT</i>
   state "<b>Open sockets</b>" as Main_Sockets: <i>Open TX and RX sockets</i>
   state "<b>Start FT thread</b>" as Main_Thread_FT
-  state "<b>Start UART thread</b>" as Main_Thread_UART
 
-  [*]--> Main_UART_Init
-  Main_UART_Init --> Main_RSYNC: Relay\ndevice
-  Main_UART_Init --> Main_Sockets: Edge\ndevice
-  Main_RSYNC --> Main_RSYNC: SYNC\nfail
+  [*]--> Main_Thread_UART
+  Main_Thread_UART --> Main_RSYNC: Relay\ndevice
+  Main_Thread_UART --> Main_Sockets: Edge\ndevice
+  Main_RSYNC --> Main_RSYNC: Timeout\n(<b>n</b> retries)
   Main_RSYNC --> Main_Sockets: SYNC\nsuccess
   Main_Sockets --> Main_Thread_FT: None
-  Main_Thread_FT --> Main_Thread_UART: None
+  Main_RSYNC --> [*]: SYNC\nfail
 }
 
 state "<b>Main idle</b>" as Main_Idle: <i>Listen for data on RX socket</i>
@@ -60,11 +59,13 @@ FT_SYNC --> FT_Assoc_Drop: SYNC\nfail
 FT_Assoc_Drop --> FT_Assoc_Idle: None
 
 'UART thread'
-state "<b>Thread UART" as UART
+state "<b>Thread UART</b>" as UART
+state "<b>UART init</b>" as UART_Init: <i>Initialize UART connection</i>
 state "<b>UART idle</b>" as UART_Idle: <i>Wait for data to send over UART</i>
 state "<b>UART send</b>" as UART_Send: <i>Send queued data over UART</i>
 
-UART --> UART_Idle: None
+UART --> UART_Init: None
+UART_Init --> UART_Idle: None
 UART_Idle --> UART_Send: Non-empty\nqueue
 UART_Send --> UART_Send: Non-empty\nqueue
 UART_Send --> UART_Idle: Empty\nqueue
