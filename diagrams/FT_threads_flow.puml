@@ -71,3 +71,5 @@ UART_Send --> UART_Send: Non-empty\nqueue
 UART_Send --> UART_Idle: Empty\nqueue
 
 @enduml
+
+'Problem: UART er en thread, men SYNC process må skje over UART. Altså må thread startes, gjøre R-SYNC, også vanlig etter det.'
