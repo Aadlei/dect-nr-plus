@@ -56,8 +56,9 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SYNC_T_SIZE						4
-#define COMMON_PORT 					12345
+#define SYNC_PROCESS_DELAY_MSEC			2000			
 #define SYNC_PORT						12346
+#define COMMON_PORT 					12345
 #define MESH_PREFIX_STR 				"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_SYNC_RX_TIMEOUT_SEC		10
@@ -406,9 +407,10 @@ static int SYNC_pt_operation(void)
 
 	while (1)
 	{
-		if (current_retries > ++max_recv_retries)
+		if (++current_retries > max_recv_retries)
 		{
 			LOG_WRN("Ran out of RX retries. Exiting RX...");
+			return -1;
 		}
 
 		struct SYNC_data rx_from_parent;
@@ -503,9 +505,10 @@ static int SYNC_ft_operation(void)
 
 	while (1)
 	{
-		if (current_retries > ++max_recv_retries)
+		if (++current_retries > max_recv_retries)
 		{
 			LOG_WRN("Ran out of RX retries. Exiting RX...");
+			return -1;
 		}
 
 		struct SYNC_data rx_from_child;
