@@ -43,4 +43,8 @@ typedef void (*uart_rx_frame_cb_t)(const uint8_t *data, uint32_t len,
                                     const struct image_metadata *meta);
 void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb);
 
+int uart_handshake_init(void);
+int uart_handshake_send_id(uint32_t long_rd_id);
+int uart_handshake_receive_id(uint32_t *long_rd_id, int timeout_sec);
+
 #endif /* UART_DATA_H */

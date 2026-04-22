@@ -88,6 +88,7 @@ uint32_t message_counter;
 uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
 static uint32_t SYNC_network_delay_parent;
+static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
 
 // Semaphores for controlling flow
 K_SEM_DEFINE(sem_if_up, 0, 1);
@@ -1205,15 +1206,13 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     case NET_EVENT_DECT_SCAN_RESULT:
 		const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *route = &result->route_info;
-/*
-		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
-		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
-			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
-					result->transmitter_long_rd_id);
+
+		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
+		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
+			LOG_INF("Skipping sibling FT 0x%08x", sibling_ft_long_rd_id);
 			break;
-		}
-		#endif*/
+    	}
+
 
 		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
 				result->transmitter_long_rd_id, route->route_cost);
@@ -1362,6 +1361,19 @@ int main(void)
 	k_sem_take(&sem_activate, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
+
+	/// --- Sibling FT-PT handshake (only for relay devices) 
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    	uart_handshake_init();
+    	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        	uart_handshake_send_id(current_long_rd_id);
+    	#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
+        	if (uart_handshake_receive_id(&sibling_ft_long_rd_id, 30)) {
+            	LOG_ERR("No sibling FT ID received, scanning without filter");
+        	}
+    	#endif
+	#endif
+	///
 
 	// --- Sink FT and regular PT specific ---
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT

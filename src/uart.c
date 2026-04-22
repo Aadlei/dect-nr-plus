@@ -8,6 +8,11 @@ LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
 
+#define HANDSHAKE_MAGIC_0 0xF4
+#define HANDSHAKE_MAGIC_1 0xAF
+#define HANDSHAKE_REPEAT  100
+#define HANDSHAKE_INTERVAL_MS 200
+
 static const struct device *uart_dev;
 static uint16_t stream_crc;
 static bool stream_active;
@@ -30,12 +35,104 @@ int uart_data_init(void)
     }
     uart_ready = true;
 
+    
 #ifdef CONFIG_DECT_RELAY_PT
     return uart_rx_start();
 #else
     return uart_tx_thread_start();
 #endif
 }
+
+int uart_handshake_init(void)
+{
+    uart_dev = DEVICE_DT_GET(DT_NODELABEL(uart1));
+    if (!device_is_ready(uart_dev)) {
+        LOG_ERR("uart1 not ready");
+        return -ENODEV;
+    }
+    return 0;
+}
+
+int uart_handshake_send_id(uint32_t long_rd_id)
+{
+    uint8_t *id = (uint8_t *)&long_rd_id;
+
+    for (int r = 0; r < HANDSHAKE_REPEAT; r++) {
+        uart_poll_out(uart_dev, HANDSHAKE_MAGIC_0);
+        uart_poll_out(uart_dev, HANDSHAKE_MAGIC_1);
+        for (int i = 0; i < 4; i++) {
+            uart_poll_out(uart_dev, id[i]);
+        }
+        k_msleep(HANDSHAKE_INTERVAL_MS);
+    }
+
+    LOG_INF("Handshake: sent FT ID 0x%08x (%d times)", long_rd_id, HANDSHAKE_REPEAT);
+    return 0;
+}
+
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+
+static volatile bool handshake_received;
+static volatile uint32_t handshake_rx_id;
+
+static uint8_t hs_rx_buf[6]; /* magic0 + magic1 + 4 ID bytes */
+static K_SEM_DEFINE(hs_rx_sem, 0, 1);
+
+static void handshake_async_cb(const struct device *dev,
+                               struct uart_event *evt, void *user_data)
+{
+    if (evt->type == UART_RX_RDY) {
+        uint8_t *d = evt->data.rx.buf + evt->data.rx.offset;
+        uint32_t len = evt->data.rx.len;
+
+        for (uint32_t i = 0; i <= len - 6; i++) {
+            if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
+                memcpy(&handshake_rx_id, &d[i + 2], 4);
+                handshake_received = true;
+                k_sem_give(&hs_rx_sem);
+                return;
+            }
+        }
+    } else if (evt->type == UART_RX_DISABLED) {
+        k_sem_give(&hs_rx_sem);
+    }
+}
+
+int uart_handshake_receive_id(uint32_t *long_rd_id, int timeout_sec)
+{
+    int ret;
+
+    handshake_received = false;
+
+    ret = uart_callback_set(uart_dev, handshake_async_cb, NULL);
+    if (ret) {
+        LOG_ERR("Handshake callback set failed: %d", ret);
+        return ret;
+    }
+
+    ret = uart_rx_enable(uart_dev, hs_rx_buf, sizeof(hs_rx_buf), 1000);
+    if (ret) {
+        LOG_ERR("Handshake RX enable failed: %d", ret);
+        return ret;
+    }
+
+    ret = k_sem_take(&hs_rx_sem, K_SECONDS(timeout_sec));
+
+    uart_rx_disable(uart_dev);
+    k_msleep(100);
+
+    if (handshake_received) {
+        *long_rd_id = handshake_rx_id;
+        LOG_INF("Handshake: received sibling FT ID 0x%08x", *long_rd_id);
+        return 0;
+    }
+
+    LOG_WRN("Handshake: timed out after %d seconds", timeout_sec);
+    return -ETIMEDOUT;
+}
+
+#endif
+
 
 #ifndef CONFIG_DECT_RELAY_PT
 #define UART_TX_STACK_SIZE 2048
