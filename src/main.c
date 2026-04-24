@@ -467,9 +467,15 @@ static int SYNC_pt_operation(void)
 		signed_T[i] = (int32_t)SYNC_timestamps.T[i];
 	}
 
-	LOG_WRN("T0: %d | T1: %d | T2: %d | T3: %d", signed_T[0], signed_T[1], signed_T[2], signed_T[3]); // TODO: Temp, remove this
-	SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
-	SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
+	LOG_WRN("32-bit: T0: %d | T1: %d | T2: %d | T3: %d", signed_T[0], signed_T[1], signed_T[2], signed_T[3]); // TODO: Temp, remove this
+
+	// Traditional NTP (assumes symmetric network delay)
+	// SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
+	// SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
+
+	// "Cheat" clock synchronization (by assuming PT->FT delay = 0)
+	SYNC_offset_parent = signed_T[1] - signed_T[0];
+	SYNC_network_delay_parent = 0; // This is obviously wrong
 
 	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
 
