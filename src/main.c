@@ -667,12 +667,19 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		return;
 	}
 
+	uint32_t time_tx = k_uptime_get_32();
+	struct hop_delays pt_delays = {
+		.num_devs = 1,
+		.per_device_delay[0] = 0
+	};
+
 	for (uint16_t i=0; i < total_chunks; i++)
 	{
 		size_t offset = i * MAX_PAYLOAD_SIZE;
 		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
 		size_t total_size = sizeof(struct data_packet) + payload_len;
 
+		// Create data packet
 		struct data_packet *packet = malloc(total_size);
 		if (packet == NULL)
 		{
@@ -680,11 +687,17 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 			return;
 		}
 
+		// Packet detail overhead
 		packet->packet_idx = i;
-		packet->total_data_size = image_size;
 		packet->total_packets = total_chunks;
+		packet->total_data_size = image_size;
+		
+		// Time/delays related
+		packet->timestamp_pt = time_tx;
+		packet->route_delays = pt_delays;
+	
+		// Payload
 		packet->payload_len = payload_len;
-
 		memcpy(packet->payload, image_data + offset, packet->payload_len);
 
 		ret = sendto(common_socket, packet, total_size, 0,
