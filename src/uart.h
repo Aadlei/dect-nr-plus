@@ -4,9 +4,10 @@
 #include <zephyr/kernel.h>
 #include <stdint.h>
 
-#define MAX_PAYLOAD_SIZE 1024
-#define CHUNK_BUF_SIZE   (12 + MAX_PAYLOAD_SIZE)  /* data_packet header + payload */
-#define CHUNK_POOL_COUNT 16
+#define MAX_PAYLOAD_SIZE    1024
+#define CHUNK_BUF_SIZE      (12 + MAX_PAYLOAD_SIZE)  /* data_packet header + payload */
+#define CHUNK_POOL_COUNT    16
+#define ROUTING_MAX_HOPS	8
 
 struct rx_chunk {
     void *fifo_reserved;
@@ -20,11 +21,19 @@ struct image_metadata {
     uint32_t seq_num;
 };
 
-struct data_packet 
+struct hop_delays {
+    uint8_t num_devs; // Number of devices so far
+    uint32_t per_device_delay[ROUTING_MAX_HOPS]; // Time delays for each link
+};
+
+struct data_packet
 {
     uint16_t packet_idx;
     uint16_t total_packets;
     size_t total_data_size;
+    uint32_t timestamp_pt;
+    uint32_t offset_pt_to_ft;
+    struct hop_delays route_delays; // cml = cumulative
     uint16_t payload_len;
     uint8_t payload[];
 } __attribute__((packed));

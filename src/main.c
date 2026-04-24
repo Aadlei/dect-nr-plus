@@ -40,6 +40,7 @@
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 // CHANGE THIS BASED ON DEVICE TYPE
+
 #if defined(CONFIG_DECT_RELAY_FT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
@@ -55,8 +56,9 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SYNC_T_SIZE						4
-#define COMMON_PORT 					12345
+#define SYNC_PROCESS_DELAY_MSEC			2000			
 #define SYNC_PORT						12346
+#define COMMON_PORT 					12345
 #define MESH_PREFIX_STR 				"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_SYNC_RX_TIMEOUT_SEC		10
@@ -406,9 +408,10 @@ static int SYNC_pt_operation(void)
 
 	while (1)
 	{
-		if (current_retries > ++max_recv_retries)
+		if (++current_retries > max_recv_retries)
 		{
 			LOG_WRN("Ran out of RX retries. Exiting RX...");
+			return -1;
 		}
 
 		struct SYNC_data rx_from_parent;
@@ -465,9 +468,15 @@ static int SYNC_pt_operation(void)
 		signed_T[i] = (int32_t)SYNC_timestamps.T[i];
 	}
 
-	LOG_WRN("T0: %d | T1: %d | T2: %d | T3: %d", signed_T[0], signed_T[1], signed_T[2], signed_T[3]); // TODO: Temp, remove this
-	SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
-	SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
+	LOG_WRN("32-bit: T0: %d | T1: %d | T2: %d | T3: %d", signed_T[0], signed_T[1], signed_T[2], signed_T[3]); // TODO: Temp, remove this
+
+	// Traditional NTP (assumes symmetric network delay)
+	// SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
+	// SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
+
+	// "Cheat" clock synchronization (by assuming PT->FT delay = 0)
+	SYNC_offset_parent = signed_T[1] - signed_T[0];
+	SYNC_network_delay_parent = 0; // This is obviously wrong
 
 	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
 
@@ -503,9 +512,10 @@ static int SYNC_ft_operation(void)
 
 	while (1)
 	{
-		if (current_retries > ++max_recv_retries)
+		if (++current_retries > max_recv_retries)
 		{
 			LOG_WRN("Ran out of RX retries. Exiting RX...");
+			return -1;
 		}
 
 		struct SYNC_data rx_from_child;
@@ -560,6 +570,7 @@ static int SYNC_ft_operation(void)
 		.sin6_family = AF_INET6,
 		.sin6_port = htons(SYNC_PORT)
 	};
+
 	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
 	if(!ok)
 	{
@@ -657,12 +668,19 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		return;
 	}
 
+	uint32_t time_tx = k_uptime_get_32();
+	struct hop_delays pt_delays = {
+		.num_devs = 1,
+		.per_device_delay[0] = 0
+	};
+
 	for (uint16_t i=0; i < total_chunks; i++)
 	{
 		size_t offset = i * MAX_PAYLOAD_SIZE;
 		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
 		size_t total_size = sizeof(struct data_packet) + payload_len;
 
+		// Create data packet
 		struct data_packet *packet = malloc(total_size);
 		if (packet == NULL)
 		{
@@ -670,11 +688,17 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 			return;
 		}
 
+		// Packet detail overhead
 		packet->packet_idx = i;
-		packet->total_data_size = image_size;
 		packet->total_packets = total_chunks;
+		packet->total_data_size = image_size;
+		
+		// Time/delays related
+		packet->timestamp_pt = time_tx;
+		packet->route_delays = pt_delays;
+	
+		// Payload
 		packet->payload_len = payload_len;
-
 		memcpy(packet->payload, image_data + offset, packet->payload_len);
 
 		ret = sendto(common_socket, packet, total_size, 0,
@@ -819,11 +843,6 @@ static void write_ft_settings(void)
 	}
 
 	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
-	#endif
 
 	// Create the device IPv6 address
 	create_and_set_device_ipv6();
@@ -869,11 +888,6 @@ static void write_pt_settings(void)
 	// Create the device IPv6 address
 	create_and_set_device_ipv6();
 
-	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
-	#endif
 	LOG_INF("DECT PT settings successfully set");
 }
 
@@ -1028,7 +1042,6 @@ static void run_as_pt(void)
         LOG_ERR("Failed to initialize UART RX: %d", ret);
         return;
     }
-
 	#elif !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 	// SPI slave start
 	int ret = spi_slave_init();
