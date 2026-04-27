@@ -53,14 +53,18 @@ int uart_handshake_init(void)
     return 0;
 }
 
-int uart_handshake_send_id(uint32_t long_rd_id)
+int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp)
 {
     uint8_t *id = (uint8_t *)&long_rd_id;
+    uint8_t *ts = (uint8_t *)&timestamp;
 
     for (int r = 0; r < HANDSHAKE_REPEAT; r++) {
         uart_poll_out(uart_dev, HANDSHAKE_MAGIC_0);
         uart_poll_out(uart_dev, HANDSHAKE_MAGIC_1);
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < 4; i++) { // For timestamp
+            uart_poll_out(uart_dev, ts[i]);
+        }
+        for (int i = 0; i < 4; i++) { // For long RD ID // TODO: Remove this magic number
             uart_poll_out(uart_dev, id[i]);
         }
         k_msleep(HANDSHAKE_INTERVAL_MS);
@@ -74,8 +78,9 @@ int uart_handshake_send_id(uint32_t long_rd_id)
 
 static volatile bool handshake_received;
 static volatile uint32_t handshake_rx_id;
+static volatile uint32_t handshake_rx_offset;
 
-static uint8_t hs_rx_buf[6]; /* magic0 + magic1 + 4 ID bytes */
+static uint8_t hs_rx_buf[10]; /* magic0 + magic1 + 4 ID bytes + 4 timestamp bytes */
 static K_SEM_DEFINE(hs_rx_sem, 0, 1);
 
 static void handshake_async_cb(const struct device *dev,
@@ -85,20 +90,26 @@ static void handshake_async_cb(const struct device *dev,
         uint8_t *d = evt->data.rx.buf + evt->data.rx.offset;
         uint32_t len = evt->data.rx.len;
 
-        for (uint32_t i = 0; i <= len - 6; i++) {
+        uint32_t current_pt_timestamp = k_uptime_get_32();
+        uint32_t sibling_ft_timestamp;
+
+        for (uint32_t i = 0; i <= len - 10; i++) { // TODO: Remove this magic number
             if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
                 memcpy(&handshake_rx_id, &d[i + 2], 4);
+                memcpy(&sibling_ft_timestamp, &d[i + 6], 4); // Index 6, because index 0 and 1 are magic. 2, 3, 4 and 5 are long_rd_id
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);
                 return;
             }
         }
+        handshake_rx_offset = sibling_ft_timestamp - current_pt_timestamp; // Offset from the POV of the FT
     } else if (evt->type == UART_RX_DISABLED) {
         k_sem_give(&hs_rx_sem);
     }
 }
 
-int uart_handshake_receive_id(uint32_t *long_rd_id, int timeout_sec)
+// Updates the long RD ID and calculated offset between this PT device timestamp and the sibling FT device in FTPT connection
+int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, uint32_t *offset, int timeout_sec)
 {
     int ret;
 
@@ -123,6 +134,7 @@ int uart_handshake_receive_id(uint32_t *long_rd_id, int timeout_sec)
 
     if (handshake_received) {
         *long_rd_id = handshake_rx_id;
+        *offset = handshake_rx_offset;
         LOG_INF("Handshake: received sibling FT ID 0x%08x", *long_rd_id);
         return 0;
     }

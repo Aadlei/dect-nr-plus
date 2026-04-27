@@ -91,6 +91,7 @@ uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
 static uint32_t SYNC_network_delay_parent;
 static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
+static uint32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
 
 // Semaphores for controlling flow
 K_SEM_DEFINE(sem_if_up, 0, 1);
@@ -1379,9 +1380,11 @@ int main(void)
 	#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
     	uart_handshake_init();
     	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
-        	uart_handshake_send_id(current_long_rd_id);
+			uint32_t T0 = k_uptime_get_32();
+			uart_handshake_send_id_timestamp(current_long_rd_id, T0);
+			// TODO: Send timestamp here
     	#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
-        	if (uart_handshake_receive_id(&sibling_ft_long_rd_id, 30)) {
+        	if (uart_handshake_receive_id_timestamp(&sibling_ft_long_rd_id, &sibling_ft_offset, 30)) {
             	LOG_ERR("No sibling FT ID received, scanning without filter");
         	}
     	#endif
