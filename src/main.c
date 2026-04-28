@@ -671,8 +671,9 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 
 	uint32_t time_tx = k_uptime_get_32();
 	struct hop_delays pt_delays = {
-		.num_devs = 1,
-		.per_device_delay[0] = 0
+		.num_devices_visited = 1,
+		.devices_visited[0] = current_long_rd_id,
+		.per_link_delay[0] = 0,
 	};
 
 	for (uint16_t i=0; i < total_chunks; i++)
@@ -1402,3 +1403,15 @@ int main(void)
 
 	return 0;
 }
+
+// UART (FT):
+// Increment num_devices_visited
+// Calculate temp delay and append to index num_device_visited
+// Add own timestamp
+// Send over UART
+
+// UART (PT):
+// Update delay at index num_device_visited with the temp value + UART delay (timestamp at FT + offset)
+// Append long RD ID to devices_visited array
+// Add own timestamps
+// Send over DECT

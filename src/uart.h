@@ -22,8 +22,9 @@ struct image_metadata {
 };
 
 struct hop_delays {
-    uint8_t num_devs; // Number of devices so far
-    uint32_t per_device_delay[ROUTING_MAX_HOPS]; // Time delays for each link
+    uint8_t num_devices_visited; // Keeps track of array indexing
+    uint32_t devices_visited[ROUTING_MAX_HOPS]; // Device visited along path
+    uint32_t per_link_delay[ROUTING_MAX_HOPS]; // Time delays for each link
 };
 
 struct data_packet
@@ -33,7 +34,7 @@ struct data_packet
     size_t total_data_size;
     uint32_t timestamp_pt;
     uint32_t offset_pt_to_ft;
-    struct hop_delays route_delays; // cml = cumulative
+    struct hop_delays route_delays;
     uint16_t payload_len;
     uint8_t payload[];
 } __attribute__((packed));
