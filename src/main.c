@@ -616,7 +616,7 @@ static void rx_thread(void)
 
 		// RX
         ret = recvfrom(common_socket, chunk->data, CHUNK_BUF_SIZE, 0,
-                   (struct sockaddr *)&src_addr, &addr_len);
+			(struct sockaddr *)&src_addr, &addr_len);
 
         if (ret < 0)
 		{
@@ -638,6 +638,7 @@ static void rx_thread(void)
             pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
 
         chunk->data_len = ret;
+
         uart_queue_chunk(chunk);
     }
 }
@@ -669,12 +670,13 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		return;
 	}
 
-	uint32_t time_tx = k_uptime_get_32();
+	// TODO: Change this so it depends on incoming data
 	struct hop_delays pt_delays = {
 		.num_devices_visited = 1,
 		.devices_visited[0] = current_long_rd_id,
 		.per_link_delay[0] = 0,
 	};
+	uint32_t time_tx = k_uptime_get_32(); // PT edge: Time at the start of TX of all chunks
 
 	for (uint16_t i=0; i < total_chunks; i++)
 	{
@@ -966,8 +968,11 @@ static void main_tx_image_message(const uint8_t *data, size_t size)
         return;
     }
 
+	// TODO: Delay from A to C: Timestamp at A TX + Offset_AB - Offset_CB
+	// At C, it must have the A timestamp and Offset_AB (both come from A so B doesnt need to create anything new, only forward)
+
     LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", size, parent_long_rd_id);
-    tx_img_data(data, size, parent_long_rd_id);
+    tx_img_data(data, size, parent_long_rd_id); // TODO: Create new function here for forwarding or alter this one to have for both sending as edge and forwarding as relay
 }
 #endif
 
@@ -1038,7 +1043,7 @@ static void run_as_pt(void)
 	k_sleep(K_SECONDS(20)); // TODO: Temp, remove this
 
 	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-    uart_rx_set_frame_callback(main_tx_image_message);
+    uart_rx_set_frame_callback(main_tx_image_message); // TODO: Change this function callback name
     int ret = uart_data_init();
     if (ret) {
         LOG_ERR("Failed to initialize UART RX: %d", ret);
@@ -1390,7 +1395,6 @@ int main(void)
         	}
     	#endif
 	#endif
-	///
 
 	// --- Sink FT and regular PT specific ---
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
@@ -1403,15 +1407,3 @@ int main(void)
 
 	return 0;
 }
-
-// UART (FT):
-// Increment num_devices_visited
-// Calculate temp delay and append to index num_device_visited
-// Add own timestamp
-// Send over UART
-
-// UART (PT):
-// Update delay at index num_device_visited with the temp value + UART delay (timestamp at FT + offset)
-// Append long RD ID to devices_visited array
-// Add own timestamps
-// Send over DECT

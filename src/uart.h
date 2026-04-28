@@ -4,10 +4,11 @@
 #include <zephyr/kernel.h>
 #include <stdint.h>
 
-#define MAX_PAYLOAD_SIZE    1024
-#define CHUNK_BUF_SIZE      (12 + MAX_PAYLOAD_SIZE)  /* data_packet header + payload */
-#define CHUNK_POOL_COUNT    16
 #define ROUTING_MAX_HOPS	8
+#define HEADER_SIZE         (18 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS) // data_packet fields + hop_delays arrays
+#define MAX_PAYLOAD_SIZE    1024
+#define CHUNK_BUF_SIZE      (HEADER_SIZE + MAX_PAYLOAD_SIZE) // data_packet header + payload 
+#define CHUNK_POOL_COUNT    16
 
 struct rx_chunk {
     void *fifo_reserved;
@@ -15,6 +16,7 @@ struct rx_chunk {
     uint8_t  data[CHUNK_BUF_SIZE];
 };
 
+// TODO: Incorporate this in 
 struct image_metadata {
     uint32_t tx_id;
     uint8_t hop_count;
@@ -27,12 +29,12 @@ struct hop_delays {
     uint32_t per_link_delay[ROUTING_MAX_HOPS]; // Time delays for each link
 };
 
-struct data_packet
-{
+// TODO: Structure this better so we can distinguish what is only necessary for PT->FT, and what needs to be present through the whole path
+struct data_packet {
     uint16_t packet_idx;
     uint16_t total_packets;
     size_t total_data_size;
-    uint32_t timestamp_pt;
+    uint32_t timestamp_pt; // NOTE: Timestamp for the start of TX of first chunk
     uint32_t offset_pt_to_ft;
     struct hop_delays route_delays;
     uint16_t payload_len;
