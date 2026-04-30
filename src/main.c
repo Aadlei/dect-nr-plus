@@ -91,7 +91,9 @@ uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
 static uint32_t SYNC_network_delay_parent;
 static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
+#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static uint32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
+#endif
 
 // Semaphores for controlling flow
 K_SEM_DEFINE(sem_if_up, 0, 1);
@@ -125,7 +127,7 @@ static int SYNC_ft_operation(void);
 
 // TX and RX threads
 static void rx_thread(void);
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id);
+static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id);
 
 // Helper functions
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
@@ -185,7 +187,12 @@ static void check_spi_image_work_handler(struct k_work *work)
 	}
 
 	// Transmit over DECT
-	tx_img_data(image_data, image_size, parent_long_rd_id);
+	struct hop_delays empty_delay_information = {
+		.num_links = 0,
+		.devices_visited = {0},
+		.per_link_delay = {0},
+	};
+	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id);
 
 	spi_slave_clear_image_flag();
 
@@ -643,12 +650,7 @@ static void rx_thread(void)
     }
 }
 
-static void tx_relay_img_data(const uint8_t *image_data, size_t image_size, const struct packet_metadata *meta, uint32_t dst_long_rd_id)
-{
-	// TODO: Fill this
-}
-
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id)
+static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
 {
 	int ret = -1;
 
@@ -675,12 +677,6 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		return;
 	}
 
-	// TODO: Change this so it depends on incoming data
-	struct hop_delays pt_delays = {
-		.num_devices_visited = 1,
-		.devices_visited[0] = current_long_rd_id,
-		.per_link_delay[0] = 0,
-	};
 	uint32_t time_tx = k_uptime_get_32(); // PT edge: Time at the start of TX of all chunks
 
 	for (uint16_t i=0; i < total_chunks; i++)
@@ -704,7 +700,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 		
 		// Time/delays related
 		packet->timestamp_pt = time_tx;
-		packet->route_delays = pt_delays;
+		packet->route_delays = delay_information;
 	
 		// Payload
 		packet->payload_len = payload_len;
@@ -965,7 +961,7 @@ static void join_network(uint32_t long_rd_id)
 }
 
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta)
+static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct packet_metadata *meta)
 {
     uint32_t parent_long_rd_id = get_parent_long_rd_id();
     if (parent_long_rd_id == 0) {
@@ -973,14 +969,29 @@ static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet
         return;
     }
 
-	// TODO: Delay from A to C: Timestamp at A TX + Offset_AB - Offset_CB
-	// At C, it must have the A timestamp and Offset_AB (both come from A so B doesnt need to create anything new, only forward)
+	// Calculate cumulative delay
+	uint8_t route_delays_idx = meta->route_delays.num_links;
+	uint32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
+	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
+	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
+	uint32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
+	// sibling_ft_offset // O_CB
+	uint32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
 
-    LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", size, parent_long_rd_id);
+	// Update values in struct
+	struct hop_delays delay_information = {
+		.num_links = ++route_delays_idx,
+	};
+	
+	for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+		delay_information.per_link_delay[i] = meta->route_delays.per_link_delay[i];
+		delay_information.devices_visited[i] = meta->route_delays.devices_visited[i];
+	}
+	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
+	delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
 
-	// TODO: Create new function here for forwarding or alter this one to have for both sending as edge and forwarding as relay
-	uint32_t parent_long_rd_id = get_parent_long_rd_id();
-	tx_relay_img_data(data, size, meta, parent_long_rd_id)
+    LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", data_size, parent_long_rd_id);
+	tx_img_data(data, data_size, delay_information, parent_long_rd_id);
 }
 #endif
 

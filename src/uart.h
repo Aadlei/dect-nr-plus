@@ -18,7 +18,7 @@ struct rx_chunk {
 
 // NOTE: Consider removing this, its troublesome with arrays over UART
 struct hop_delays {
-    uint8_t num_devices_visited; // Keeps track of array indexing
+    uint8_t num_links; // Keeps track of array indexing
     uint32_t devices_visited[ROUTING_MAX_HOPS]; // Device visited along path
     uint32_t per_link_delay[ROUTING_MAX_HOPS]; // Time delays for each link
 };
@@ -62,4 +62,4 @@ int uart_handshake_init(void);
 int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp);
 int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, uint32_t *offset, int timeout_sec);
 
-#endif /* UART_DATA_H */
+#endif

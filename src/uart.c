@@ -224,7 +224,7 @@ int uart_stream_begin(size_t total_length, const struct packet_metadata *meta)
         (meta->offset_pt_to_ft >> 8) & 0xFF,
         (meta->offset_pt_to_ft >> 16) & 0xFF,
         (meta->offset_pt_to_ft >> 24) & 0xFF,
-        meta->route_delays.num_devices_visited,
+        meta->route_delays.num_links,
         // devices_visited
         // per_link_delay
         // total_length
@@ -520,7 +520,7 @@ static void process_byte(uint8_t b)
                     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
                 // route_delays.num_devices
-                rx_frame_work.meta.route_delays.num_devices = rx_header[parse_idx++];
+                rx_frame_work.meta.route_delays.num_links = rx_header[parse_idx++];
 
                 // route_delays.devices_visited
                 for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
@@ -638,3 +638,5 @@ void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb)
 }
 
 #endif /* CONFIG_DECT_RELAY_PT */
+
+// TODO: Consider redesigning to buffer of DECT packets and adding timeout
