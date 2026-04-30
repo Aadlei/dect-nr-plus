@@ -5,6 +5,12 @@
 
 LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 
+// STREAM HEADER:
+// MAGIC_0, MAGIC_1, MAGIC_0, MAGIC_1
+// struct packet_metadata
+// total packet size
+#define STREAM_HEADER_SIZE (4 + sizeof(size_t) + (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS))) // 4 magic bytes + data size + packet_metadata to bytes
+
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
 
@@ -95,14 +101,14 @@ static void handshake_async_cb(const struct device *dev,
 
         for (uint32_t i = 0; i <= len - 10; i++) { // TODO: Remove this magic number
             if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
-                memcpy(&handshake_rx_id, &d[i + 2], 4);
-                memcpy(&sibling_ft_timestamp, &d[i + 6], 4); // Index 6, because index 0 and 1 are magic. 2, 3, 4 and 5 are long_rd_id
+                memcpy(&sibling_ft_timestamp, &d[i + 2], 4); // Bytes 2-5: timestamp
+                memcpy(&handshake_rx_idx, &d[i + 6], 4); // Bytes: 6-9: long RD ID 
+                handshake_rx_offset = sibling_ft_timestamp - current_pt_timestamp; // Offset from the POV of the FT
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);
                 return;
             }
         }
-        handshake_rx_offset = sibling_ft_timestamp - current_pt_timestamp; // Offset from the POV of the FT
     } else if (evt->type == UART_RX_DISABLED) {
         k_sem_give(&hs_rx_sem);
     }
@@ -174,7 +180,7 @@ static void uart_out_bytes(const uint8_t *data, size_t len)
     k_sem_take(&uart_tx_done_sem, K_FOREVER);
 }
 
-int uart_send_image(const uint8_t *data, uint32_t length, const struct image_metadata *meta)
+int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta)
 {
     int ret = uart_stream_begin(length, meta);
     if (ret)
@@ -189,38 +195,65 @@ bool uart_is_ready(void) { return uart_ready; }
 
 /* ── Streaming API ── */
 
-int uart_stream_begin(size_t total_length, const struct image_metadata *meta)
+int uart_stream_begin(size_t total_length, const struct packet_metadata *meta)
 {
     if (!uart_ready)
         return -ENOTCONN;
     if (stream_active)
         LOG_WRN("Previous stream not finished");
 
-    uint8_t header[] = {
+    // Magic + non-array elements of metadata struct
+    uint8_t header[STREAM_HEADER_SIZE] = {
         MAGIC_0,
         MAGIC_1,
         MAGIC_0,
         MAGIC_1,
-        meta->tx_id & 0xFF,
-        (meta->tx_id >> 8) & 0xFF,
-        meta->hop_count,
-        (meta->seq_num >> 0) & 0xFF,
-        (meta->seq_num >> 8) & 0xFF,
-        (meta->seq_num >> 16) & 0xFF,
-        (meta->seq_num >> 24) & 0xFF,
         (total_length >> 0) & 0xFF,
         (total_length >> 8) & 0xFF,
         (total_length >> 16) & 0xFF,
         (total_length >> 24) & 0xFF,
+        (meta->seq_num >> 0) & 0xFF,
+        (meta->seq_num >> 8) & 0xFF,
+        (meta->seq_num >> 16) & 0xFF,
+        (meta->seq_num >> 24) & 0xFF,
+        (meta->timestamp_pt >> 0) & 0xFF,
+        (meta->timestamp_pt >> 8) & 0xFF,
+        (meta->timestamp_pt >> 16) & 0xFF,
+        (meta->timestamp_pt >> 24) & 0xFF,
+        (meta->offset_pt_to_ft >> 0) & 0xFF,
+        (meta->offset_pt_to_ft >> 8) & 0xFF,
+        (meta->offset_pt_to_ft >> 16) & 0xFF,
+        (meta->offset_pt_to_ft >> 24) & 0xFF,
+        meta->route_delays.num_devices_visited,
+        // devices_visited
+        // per_link_delay
+        // total_length
     };
+
+    int header_idx = 21; // Count number of elements in above array
+
+    // devices_visited array of hop_delays in metadata
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+        for (int j = 0; j < sizeof(meta->route_delays.devices_visited[0]); j++) {
+            header[header_idx++] = (meta->route_delays.devices_visited[i] >> (j * 8)) & 0xFF;
+        }
+    }
+
+    // per_link_delay array of hop delays in metadata
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+        for (int j = 0; j < sizeof(meta->route_delays.per_link_delay[0]); j++) {
+            header[header_idx++] = (meta->route_delays.per_link_delay[i] >> (j * 8)) & 0xFF;
+        }
+    }
+
     uart_out_bytes(header, sizeof(header));
 
-    /* CRC seeded over metadata bytes (header[4..10]) */
-    stream_crc = crc16_update(0xFFFF, &header[4], 7);
+    /* CRC seeded over metadata bytes (header[4] and out) */
+    stream_crc = crc16_update(0xFFFF, &header[4], sizeof(header) - 4);
     stream_active = true;
 
-    LOG_INF("UART stream start: %u bytes (tx=%u, hops=%u, seq=%u)",
-            total_length, meta->tx_id, meta->hop_count, meta->seq_num);
+    LOG_INF("UART stream start: %u bytes",
+            total_length);
     return 0;
 }
 
@@ -284,10 +317,11 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         {
             expected_total = total_packets;
             received_count = 0;
-            struct image_metadata meta = {
-                .tx_id = current_long_rd_id,
-                .hop_count = 1,
+            struct packet_metadata meta = {
                 .seq_num = message_counter++,
+                .timestamp_pt = pkt->timestamp_pt,
+                .offset_pt_to_ft = pkt->offset_pt_to_ft,
+                .route_delays = pkt->route_delays,
             };
             uart_stream_begin(total_size, &meta);
         }
@@ -360,7 +394,7 @@ typedef enum {
 
 static uart_rx_frame_cb_t rx_frame_cb;
 static rx_state_t rx_state = WAIT_MAGIC_0;
-static uint8_t    rx_header[11];
+static uint8_t    rx_header[STREAM_HEADER_SIZE];
 static uint8_t    rx_header_idx;
 static uint8_t   *rx_payload_buf;
 static uint32_t   rx_payload_len;
@@ -373,7 +407,7 @@ static uint16_t   rx_running_crc;
 struct rx_frame_work_t {
     struct k_work work;
     uint32_t payload_len;
-    struct image_metadata meta;
+    struct packet_metadata meta;
     uint8_t payload[UART_RX_MAX_PAYLOAD];
 };
 static struct rx_frame_work_t rx_frame_work;
@@ -420,10 +454,10 @@ static void process_byte(uint8_t b)
     case READ_HEADER:
         rx_header[rx_header_idx++] = b;
         if (rx_header_idx == sizeof(rx_header)) {
-            rx_payload_len = rx_header[7]
-                           | (rx_header[8]  << 8)
-                           | (rx_header[9]  << 16)
-                           | (rx_header[10] << 24);
+            rx_payload_len = rx_header[4]
+                           | (rx_header[5]  << 8)
+                           | (rx_header[6]  << 16)
+                           | (rx_header[7] << 24);
 
             if (rx_payload_len == 0 || rx_payload_len > UART_RX_MAX_PAYLOAD) {
                 LOG_WRN("Invalid payload len %u, resetting", rx_payload_len);
@@ -431,7 +465,7 @@ static void process_byte(uint8_t b)
                 break;
             }
 
-            rx_running_crc = crc16_update_rx(0xFFFF, rx_header, 7);
+            rx_running_crc = crc16_update_rx(0xFFFF, rx_header, sizeof(rx_header));
             rx_payload_received = 0;
             rx_payload_buf = rx_payload_storage;
             LOG_INF("RX frame: len=%u", rx_payload_len);
@@ -456,12 +490,58 @@ static void process_byte(uint8_t b)
             uint16_t received_crc = rx_crc_bytes[0] | (rx_crc_bytes[1] << 8);
             if (received_crc == rx_running_crc) {
                 LOG_INF("RX frame OK (CRC=0x%04X)", received_crc);
-                rx_frame_work.meta = (struct image_metadata){
-                    .tx_id     = rx_header[0] | (rx_header[1] << 8),
-                    .hop_count = rx_header[2] + 1,
-                    .seq_num   = rx_header[3] | (rx_header[4] << 8)
-                               | (rx_header[5] << 16) | (rx_header[6] << 24),
-                };
+
+                rx_frame_work.meta = struct packet_metadata;
+                
+                int parse_idx = 4; // Index after magic bytes
+                uint8_t b0, b1, b2, b3;
+
+                // seq_num
+                b0 = rx_header[parse_idx++]; 
+                b1 = rx_header[parse_idx++]; 
+                b2 = rx_header[parse_idx++]; 
+                b3 = rx_header[parse_idx++];
+                rx_frame_work.meta.seq_num = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+
+                // timestamp_ftpt_child
+                b0 = rx_header[parse_idx++]; 
+                b1 = rx_header[parse_idx++]; 
+                b2 = rx_header[parse_idx++]; 
+                b3 = rx_header[parse_idx++];
+                rx_frame_work.meta.timestamp_ftpt_child = 
+                    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+
+                // offset_pt_to_ftpt
+                b0 = rx_header[parse_idx++]; 
+                b1 = rx_header[parse_idx++]; 
+                b2 = rx_header[parse_idx++]; 
+                b3 = rx_header[parse_idx++];
+                rx_frame_work.meta.offset_relay_pt_to_ft = 
+                    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+
+                // route_delays.num_devices
+                rx_frame_work.meta.route_delays.num_devices = rx_header[parse_idx++];
+
+                // route_delays.devices_visited
+                for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+                    b0 = rx_header[parse_idx++];
+                    b1 = rx_header[parse_idx++]; 
+                    b2 = rx_header[parse_idx++]; 
+                    b3 = rx_header[parse_idx++];
+                    rx_frame_work.meta.route_delays.devices_visited[i] = 
+                        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                }
+
+                // route_delays.per_link_delay
+                for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+                    b0 = rx_header[parse_idx++];
+                    b1 = rx_header[parse_idx++]; 
+                    b2 = rx_header[parse_idx++]; 
+                    b3 = rx_header[parse_idx++];
+                    rx_frame_work.meta.route_delays.per_link_delay[i] = 
+                        b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                }
+
                 rx_frame_work.payload_len = rx_payload_len;
                 memcpy(rx_frame_work.payload, rx_payload_buf, rx_payload_len);
                 k_work_submit(&rx_frame_work.work);
@@ -475,7 +555,7 @@ static void process_byte(uint8_t b)
     }
 }
 
-static void uart_rx_proc_fn(void *p1, void *p2, void *p3)
+static void uart_rx_proc_fn(void *p1, void *p2, void *p3) // Maybe here that incoming data of UART frame is handled
 {
     uint8_t buf[64];
     while (1) {

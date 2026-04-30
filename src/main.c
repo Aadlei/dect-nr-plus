@@ -192,8 +192,10 @@ static void check_spi_image_work_handler(struct k_work *work)
 	// Reschedule work
 	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
 	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
-}
-#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+} /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta)
+#endif
 
 // LED 2 turn-off work
 #if defined(CONFIG_DK_LIBRARY)
@@ -469,8 +471,6 @@ static int SYNC_pt_operation(void)
 		signed_T[i] = (int32_t)SYNC_timestamps.T[i];
 	}
 
-	LOG_WRN("32-bit: T0: %d | T1: %d | T2: %d | T3: %d", signed_T[0], signed_T[1], signed_T[2], signed_T[3]); // TODO: Temp, remove this
-
 	// Traditional NTP (assumes symmetric network delay)
 	// SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
 	// SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
@@ -641,6 +641,11 @@ static void rx_thread(void)
 
         uart_queue_chunk(chunk);
     }
+}
+
+static void tx_relay_img_data(const uint8_t *image_data, size_t image_size, const struct packet_metadata *meta, uint32_t dst_long_rd_id)
+{
+	// TODO: Fill this
 }
 
 static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id)
@@ -960,7 +965,7 @@ static void join_network(uint32_t long_rd_id)
 }
 
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static void main_tx_image_message(const uint8_t *data, size_t size)
+static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta)
 {
     uint32_t parent_long_rd_id = get_parent_long_rd_id();
     if (parent_long_rd_id == 0) {
@@ -972,7 +977,10 @@ static void main_tx_image_message(const uint8_t *data, size_t size)
 	// At C, it must have the A timestamp and Offset_AB (both come from A so B doesnt need to create anything new, only forward)
 
     LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", size, parent_long_rd_id);
-    tx_img_data(data, size, parent_long_rd_id); // TODO: Create new function here for forwarding or alter this one to have for both sending as edge and forwarding as relay
+
+	// TODO: Create new function here for forwarding or alter this one to have for both sending as edge and forwarding as relay
+	uint32_t parent_long_rd_id = get_parent_long_rd_id();
+	tx_relay_img_data(data, size, meta, parent_long_rd_id)
 }
 #endif
 
@@ -1043,7 +1051,7 @@ static void run_as_pt(void)
 	k_sleep(K_SECONDS(20)); // TODO: Temp, remove this
 
 	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-    uart_rx_set_frame_callback(main_tx_image_message); // TODO: Change this function callback name
+    uart_rx_set_frame_callback(main_relay_tx); // TODO: Change this function callback name
     int ret = uart_data_init();
     if (ret) {
         LOG_ERR("Failed to initialize UART RX: %d", ret);
