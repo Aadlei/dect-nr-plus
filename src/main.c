@@ -619,10 +619,10 @@ static void rx_thread(void)
 			continue;
 		}
 
-		struct data_packet *pkt_recv = malloc(sizeof(struct data_packet));
+		struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
 		
 		// RX
-        ret = recvfrom(common_socket, &pkt_recv, CHUNK_BUF_SIZE, 0,
+        ret = recvfrom(common_socket, pkt_recv, CHUNK_BUF_SIZE, 0,
 			(struct sockaddr *)&src_addr, &addr_len);
 
 		if (ret < 0)
@@ -641,7 +641,7 @@ static void rx_thread(void)
 		}
 		
 		LOG_INF("Chunk %d/%d (%d bytes)",
-            pkt_recv->offset_pt_to_ft + 1, pkt_recv->total_packets, pkt_recv->payload_len);
+            pkt_recv->packet_idx + 1, pkt_recv->total_packets, pkt_recv->payload_len);
 			
 		// If this is sink, update delay information
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
@@ -656,7 +656,7 @@ static void rx_thread(void)
 		struct hop_delays delay_information = {
 			.num_links = ++route_delays_idx,
 		};
-		
+
 		for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
 			delay_information.per_link_delay[i] = pkt_recv->route_delays.per_link_delay[i];
 			delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
@@ -668,9 +668,10 @@ static void rx_thread(void)
 		#endif
 
 		struct rx_chunk *chunk = uart_get_free_chunk();
-		
-		memcpy(chunk->data, pkt_recv, sizeof(*pkt_recv));
+		memcpy(chunk->data, pkt_recv, ret);
+
 		free(pkt_recv); // Free the malloc from earlier
+
 		chunk->data_len = ret;
 
         uart_queue_chunk(chunk);
