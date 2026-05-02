@@ -76,7 +76,7 @@ int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp)
         k_msleep(HANDSHAKE_INTERVAL_MS);
     }
 
-    LOG_INF("Handshake: sent FT ID 0x%08x (%d times)", long_rd_id, HANDSHAKE_REPEAT);
+    LOG_INF("Handshake: sent FT ID 0x%08x (%d times)", long_rd_id, HANDSHAKE_REPEAT); // TODO: Print offset here
     return 0;
 }
 
@@ -102,7 +102,7 @@ static void handshake_async_cb(const struct device *dev,
         for (uint32_t i = 0; i <= len - 10; i++) { // TODO: Remove this magic number
             if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
                 memcpy(&sibling_ft_timestamp, &d[i + 2], 4); // Bytes 2-5: timestamp
-                memcpy(&handshake_rx_idx, &d[i + 6], 4); // Bytes: 6-9: long RD ID 
+                memcpy(&handshake_rx_id, &d[i + 6], 4); // Bytes: 6-9: long RD ID 
                 handshake_rx_offset = sibling_ft_timestamp - current_pt_timestamp; // Offset from the POV of the FT
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);
@@ -490,8 +490,6 @@ static void process_byte(uint8_t b)
             uint16_t received_crc = rx_crc_bytes[0] | (rx_crc_bytes[1] << 8);
             if (received_crc == rx_running_crc) {
                 LOG_INF("RX frame OK (CRC=0x%04X)", received_crc);
-
-                rx_frame_work.meta = struct packet_metadata;
                 
                 int parse_idx = 4; // Index after magic bytes
                 uint8_t b0, b1, b2, b3;
@@ -508,7 +506,7 @@ static void process_byte(uint8_t b)
                 b1 = rx_header[parse_idx++]; 
                 b2 = rx_header[parse_idx++]; 
                 b3 = rx_header[parse_idx++];
-                rx_frame_work.meta.timestamp_ftpt_child = 
+                rx_frame_work.meta.timestamp_pt = 
                     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
                 // offset_pt_to_ftpt
@@ -516,7 +514,7 @@ static void process_byte(uint8_t b)
                 b1 = rx_header[parse_idx++]; 
                 b2 = rx_header[parse_idx++]; 
                 b3 = rx_header[parse_idx++];
-                rx_frame_work.meta.offset_relay_pt_to_ft = 
+                rx_frame_work.meta.offset_pt_to_ft = 
                     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
 
                 // route_delays.num_devices

@@ -39,8 +39,6 @@
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
-// CHANGE THIS BASED ON DEVICE TYPE
-
 #if defined(CONFIG_DECT_RELAY_FT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
@@ -186,7 +184,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 		return;
 	}
 
-	// Transmit over DECT
+	// Transmit over DECT (as edge the delay information is empty)
 	struct hop_delays empty_delay_information = {
 		.num_links = 0,
 		.devices_visited = {0},
@@ -201,7 +199,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 } /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 #elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta)
+static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
 #endif
 
 // LED 2 turn-off work
@@ -1246,12 +1244,18 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		const struct dect_scan_result_evt *result = cb->info;
 		const struct dect_route_info *route = &result->route_info;
 
+		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
+					result->transmitter_long_rd_id);
+
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
 			LOG_INF("Skipping sibling FT 0x%08x", sibling_ft_long_rd_id);
 			break;
     	}
-
+		#endif
 
 		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
 				result->transmitter_long_rd_id, route->route_cost);
