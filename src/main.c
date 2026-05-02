@@ -44,7 +44,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -190,6 +190,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 		.devices_visited = {0},
 		.per_link_delay = {0},
 	};
+	empty_delay_information.devices_visited[0] = current_long_rd_id;
+
 	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id);
 
 	spi_slave_clear_image_flag();
@@ -617,32 +619,59 @@ static void rx_thread(void)
 			continue;
 		}
 
-        struct rx_chunk *chunk = uart_get_free_chunk();
-
+		struct data_packet *pkt_recv = malloc(sizeof(struct data_packet));
+		
 		// RX
-        ret = recvfrom(common_socket, chunk->data, CHUNK_BUF_SIZE, 0,
+        ret = recvfrom(common_socket, &pkt_recv, CHUNK_BUF_SIZE, 0,
 			(struct sockaddr *)&src_addr, &addr_len);
 
-        if (ret < 0)
+		if (ret < 0)
 		{
-            uart_return_free_chunk(chunk);
-            LOG_WRN("RX receive failed: %d", errno);
-            k_sleep(K_SECONDS(1));
-            continue;
-        }
+			free(pkt_recv);
+			LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
+			k_sleep(K_SECONDS(1));
+			continue;
+		}
 
-        if (ret < (int)sizeof(struct data_packet))
+		if (ret < (int)sizeof(struct data_packet))
 		{
-            uart_return_free_chunk(chunk);
-            LOG_WRN("Packet too small: %d bytes", ret);
-            continue;
-        }
+			free(pkt_recv);
+			LOG_WRN("Packet too small: %d bytes", ret);
+			continue;
+		}
+		
+		LOG_INF("Chunk %d/%d (%d bytes)",
+            pkt_recv->offset_pt_to_ft + 1, pkt_recv->total_packets, pkt_recv->payload_len);
+			
+		// If this is sink, update delay information
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		uint8_t route_delays_idx = pkt_recv->route_delays.num_links;
+		uint32_t current_delay = pkt_recv->route_delays.per_link_delay[route_delays_idx];
+		uint32_t ft_this_timestamp = k_uptime_get_32(); // T_B
+		uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt; // T_A
+		uint32_t offset_pt_to_ft = pkt_recv->offset_pt_to_ft; // O_AB
+		uint32_t cumulative_delay = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
-        struct data_packet *pkt = (struct data_packet *)chunk->data;
-        LOG_INF("Chunk %d/%d (%d bytes)",
-            pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
+		// Update values in struct
+		struct hop_delays delay_information = {
+			.num_links = ++route_delays_idx,
+		};
+		
+		for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+			delay_information.per_link_delay[i] = pkt_recv->route_delays.per_link_delay[i];
+			delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
+		}
+		delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
+		delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
 
-        chunk->data_len = ret;
+		pkt_recv->route_delays = delay_information;
+		#endif
+
+		struct rx_chunk *chunk = uart_get_free_chunk();
+		
+		memcpy(chunk->data, pkt_recv, sizeof(*pkt_recv));
+		free(pkt_recv); // Free the malloc from earlier
+		chunk->data_len = ret;
 
         uart_queue_chunk(chunk);
     }
@@ -1249,6 +1278,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
+			}
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
@@ -1323,7 +1353,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
     default:
         LOG_WRN("Unhandled DECT event: 0x%llx", event);
         break;
-    }
+	}
 }
 
 int main(void)
