@@ -89,8 +89,8 @@ uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
 static uint32_t SYNC_network_delay_parent;
 static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
-#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static uint32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static int32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
 #endif
 
 // Semaphores for controlling flow
@@ -649,7 +649,7 @@ static void rx_thread(void)
 		uint32_t current_delay = pkt_recv->route_delays.per_link_delay[route_delays_idx];
 		uint32_t ft_this_timestamp = k_uptime_get_32(); // T_B
 		uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt; // T_A
-		uint32_t offset_pt_to_ft = pkt_recv->offset_pt_to_ft; // O_AB
+		int32_t offset_pt_to_ft = pkt_recv->offset_pt_to_ft; // O_AB
 		uint32_t cumulative_delay = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
 		// Update values in struct
@@ -709,8 +709,8 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 
 	for (uint16_t i=0; i < total_chunks; i++)
 	{
-		size_t offset = i * MAX_PAYLOAD_SIZE;
-		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+		size_t data_offset = i * MAX_PAYLOAD_SIZE;
+		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - data_offset);
 		size_t total_size = sizeof(struct data_packet) + payload_len;
 
 		// Create data packet
@@ -732,7 +732,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 	
 		// Payload
 		packet->payload_len = payload_len;
-		memcpy(packet->payload, image_data + offset, packet->payload_len);
+		memcpy(packet->payload, image_data + data_offset, packet->payload_len);
 
 		ret = sendto(common_socket, packet, total_size, 0,
 			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
@@ -1002,7 +1002,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	uint32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
 	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
 	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
-	uint32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
+	int32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
 	// sibling_ft_offset // O_CB
 	uint32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
 

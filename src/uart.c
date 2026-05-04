@@ -31,6 +31,8 @@ static struct k_fifo pending_chunks;
 extern uint32_t current_long_rd_id;
 extern uint32_t message_counter;
 
+
+
 /* ── Init ── */
 int uart_data_init(void)
 {
@@ -84,7 +86,7 @@ int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp)
 
 static volatile bool handshake_received;
 static volatile uint32_t handshake_rx_id;
-static volatile uint32_t handshake_rx_offset;
+static volatile int32_t handshake_rx_offset;
 
 static uint8_t hs_rx_buf[10]; /* magic0 + magic1 + 4 ID bytes + 4 timestamp bytes */
 static K_SEM_DEFINE(hs_rx_sem, 0, 1);
@@ -115,7 +117,7 @@ static void handshake_async_cb(const struct device *dev,
 }
 
 // Updates the long RD ID and calculated offset between this PT device timestamp and the sibling FT device in FTPT connection
-int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, uint32_t *offset, int timeout_sec)
+int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, int32_t *offset, int timeout_sec)
 {
     int ret;
 
@@ -574,7 +576,7 @@ static void uart_async_cb(const struct device *dev,
 
     case UART_RX_RDY:
         ring_buf_put(&uart_rx_ring,
-                     evt->data.rx.buf + evt->data.rx.offset,
+                     evt->data.rx.buf + evt->data.rx.offset, // offset is not SYNC offset
                      evt->data.rx.len);
         k_sem_give(&uart_rx_sem);
         break;

@@ -28,7 +28,7 @@ struct hop_delays {
 struct packet_metadata {
     uint32_t seq_num;
     uint32_t timestamp_pt; // Same as timestamp_pt in data_packet
-    uint32_t offset_pt_to_ft; // Same as offset_pt_to_ft in data_packet
+    int32_t offset_pt_to_ft; // Same as offset_pt_to_ft in data_packet
     struct hop_delays route_delays;
 };
 
@@ -38,7 +38,7 @@ struct data_packet {
     uint16_t total_packets;
     size_t total_data_size;
     uint32_t timestamp_pt; // NOTE: Timestamp for the start of TX of first chunk
-    uint32_t offset_pt_to_ft; // Offset between PT and FT (DECT)
+    int32_t offset_pt_to_ft; // Offset between PT and FT (DECT)
     struct hop_delays route_delays;
     uint16_t payload_len;
     uint8_t payload[];
@@ -49,6 +49,7 @@ int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_me
 int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta);
 int uart_stream_chunk(const uint8_t *data, uint16_t len);
 int uart_stream_end(void);
+int uart_rx_start(void);
 int uart_tx_thread_start(void);
 struct rx_chunk *uart_get_free_chunk(void);
 void uart_return_free_chunk(struct rx_chunk *chunk);
@@ -60,6 +61,6 @@ void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb);
 
 int uart_handshake_init(void);
 int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp);
-int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, uint32_t *offset, int timeout_sec);
+int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, int32_t *offset, int timeout_sec);
 
 #endif
