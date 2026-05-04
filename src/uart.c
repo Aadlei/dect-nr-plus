@@ -365,7 +365,7 @@ int uart_tx_thread_start(void)
 #define UART_RX_BUF_COUNT    2
 #define UART_RX_TIMEOUT_US   1000
 #define UART_RX_MAX_PAYLOAD  (1024 * 16)
-#define UART_RING_BUF_SIZE   32768
+#define UART_RING_BUF_SIZE   8192
 
 /* Double-buffered RX */
 static uint8_t rx_bufs[UART_RX_BUF_COUNT][UART_RX_BUF_SIZE];
