@@ -3,11 +3,9 @@ nRF9151 DK Image Receiver with MQTT Publishing
 """
 import serial
 import struct
-import time
 import sys
 import argparse
 import json
-from pathlib import Path
 from datetime import datetime
 import paho.mqtt.client as mqtt
 
@@ -36,10 +34,7 @@ def print_log(data: bytes):
     except Exception:
         pass
 
-def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
+def receive_images(port, baudrate, mqtt_broker, mqtt_port):
     mqtt_client = None
     if mqtt_broker:
         try:
@@ -60,7 +55,6 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
 
     print(f"=== nRF9151 Image Receiver ===")
     print(f"Port: {port}  Baud: {baudrate}")
-    print(f"Output: {out.absolute()}")
     print(f"Press Ctrl+C to stop\n")
 
     image_count = 0
@@ -111,21 +105,12 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
 
                 image_count += 1
                 ts = datetime.now()
-                timestamp_str = ts.strftime("%Y%m%d_%H%M%S")
-                filename = f"image_{timestamp_str}_{image_count:04d}.jpg"
-                filepath = out / filename
-
-                with open(filepath, 'wb') as f:
-                    f.write(payload)
-
                 kb = length / 1024
-                print(f"\n[IMAGE #{image_count}] {filepath.name}  "
-                      f"({kb:.1f} KB, CRC=0x{crc_calc:04X} OK)")
+                print(f"\n[IMAGE #{image_count}]  ({kb:.1f} KB, CRC=0x{crc_calc:04X} OK)")
                 print(f"  tx_id={tx_id}  hops={hop_count}  seq={seq_num}")
 
                 if mqtt_client:
                     mqtt_data = {
-                        "filename": filename,
                         "timestamp": ts.timestamp(),
                         "size_bytes": length,
                         "size_kb": round(kb, 2),
@@ -151,18 +136,16 @@ def receive_images(port, baudrate, output_dir, mqtt_broker, mqtt_port):
 def main():
     parser = argparse.ArgumentParser(
         description="Receive images from nRF9151 DK and publish via MQTT")
-    parser.add_argument("--port", default="COM7",
-                        help="Serial port (default: COM7)")
+    parser.add_argument("--port", default="/dev/ttyUSB0",
+                        help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", type=int, default=1000000,
                         help="Baud rate (default: 1000000)")
-    parser.add_argument("--outdir", default="received_images",
-                        help="Output directory (default: received_images)")
     parser.add_argument("--mqtt-broker", default="10.225.150.248",
                         help="MQTT broker address")
     parser.add_argument("--mqtt-port", type=int, default=1883,
                         help="MQTT broker port")
     args = parser.parse_args()
-    receive_images(args.port, args.baud, args.outdir, args.mqtt_broker, args.mqtt_port)
+    receive_images(args.port, args.baud, args.mqtt_broker, args.mqtt_port)
 
 if __name__ == "__main__":
     main()

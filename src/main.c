@@ -44,7 +44,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -646,6 +646,13 @@ static void rx_thread(void)
 		// If this is sink, update delay information
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 		uint8_t route_delays_idx = pkt_recv->route_delays.num_links;
+
+		if (route_delays_idx >= ROUTING_MAX_HOPS - 1) {
+			LOG_ERR("route_delays_idx %d out of bounds, dropping chunk", route_delays_idx);
+			free(pkt_recv);
+			continue;
+		}
+
 		uint32_t current_delay = pkt_recv->route_delays.per_link_delay[route_delays_idx];
 		uint32_t ft_this_timestamp = k_uptime_get_32(); // T_B
 		uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt; // T_A
@@ -999,6 +1006,13 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 
 	// Calculate cumulative delay
 	uint8_t route_delays_idx = meta->route_delays.num_links;
+
+	if (route_delays_idx >= ROUTING_MAX_HOPS) {
+		LOG_ERR("route_delays_idx %d out of bounds (max %d), dropping frame",
+				route_delays_idx, ROUTING_MAX_HOPS);
+		return;
+	}
+
 	uint32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
 	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
 	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
@@ -1015,6 +1029,8 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 		delay_information.per_link_delay[i] = meta->route_delays.per_link_delay[i];
 		delay_information.devices_visited[i] = meta->route_delays.devices_visited[i];
 	}
+
+
 	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
 	delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
 

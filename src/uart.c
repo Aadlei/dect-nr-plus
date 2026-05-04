@@ -396,7 +396,7 @@ typedef enum {
 
 static uart_rx_frame_cb_t rx_frame_cb;
 static rx_state_t rx_state = WAIT_MAGIC_0;
-static uint8_t    rx_header[STREAM_HEADER_SIZE];
+static uint8_t    rx_header[STREAM_HEADER_SIZE - 4];
 static uint8_t    rx_header_idx;
 static uint8_t   *rx_payload_buf;
 static uint32_t   rx_payload_len;
@@ -456,10 +456,10 @@ static void process_byte(uint8_t b)
     case READ_HEADER:
         rx_header[rx_header_idx++] = b;
         if (rx_header_idx == sizeof(rx_header)) {
-            rx_payload_len = rx_header[4]
-                           | (rx_header[5]  << 8)
-                           | (rx_header[6]  << 16)
-                           | (rx_header[7] << 24);
+            rx_payload_len = rx_header[0]
+                           | (rx_header[1]  << 8)
+                           | (rx_header[2]  << 16)
+                           | (rx_header[3] << 24);
 
             if (rx_payload_len == 0 || rx_payload_len > UART_RX_MAX_PAYLOAD) {
                 LOG_WRN("Invalid payload len %u, resetting", rx_payload_len);
