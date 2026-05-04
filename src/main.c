@@ -44,7 +44,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -1279,7 +1279,8 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
-			}
+			break;
+		}
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
