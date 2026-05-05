@@ -664,12 +664,9 @@ static void rx_thread(void)
 			.num_links = ++route_delays_idx,
 		};
 
-		LOG_INF("Cumulative delays:");
 		for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
 			delay_information.per_link_delay[i] = pkt_recv->route_delays.per_link_delay[i];
 			delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
-		
-			LOG_INF("  Link %d: %u", i+1, delay_information.per_link_delay[i]);
 		}
 		delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
 		delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
@@ -1027,7 +1024,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	LOG_INF("current_delay: %u", current_delay);
 	LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
 	LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
-	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft); // TODO: Fix this black sheep
+	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
 	LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
 
 	// Update values in struct
@@ -1042,11 +1039,6 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	
 	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
 	delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
-	
-	LOG_INF("Cumulative delays:");
-	for (int i = 0; i <= route_delays_idx; i++) {
-		LOG_INF("  Link %d: %ums", i+1, delay_information.per_link_delay[i]);
-	}
 
     LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", data_size, parent_long_rd_id);
 	tx_img_data(data, data_size, delay_information, parent_long_rd_id);
