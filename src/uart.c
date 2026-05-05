@@ -105,7 +105,7 @@ static void handshake_async_cb(const struct device *dev,
             if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
                 memcpy(&sibling_ft_timestamp, &d[i + 2], 4); // Bytes 2-5: timestamp
                 memcpy(&handshake_rx_id, &d[i + 6], 4); // Bytes: 6-9: long RD ID 
-                handshake_rx_offset = sibling_ft_timestamp - current_pt_timestamp; // Offset from the POV of the FT
+                handshake_rx_offset = (int32_t)sibling_ft_timestamp - (int32_t)current_pt_timestamp; // Offset from the POV of the FT
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);
                 return;
@@ -143,7 +143,7 @@ int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, int32_t *offset, i
     if (handshake_received) {
         *long_rd_id = handshake_rx_id;
         *offset = handshake_rx_offset;
-        LOG_INF("Handshake: received sibling FT ID 0x%08x", *long_rd_id);
+        LOG_INF("Handshake: received sibling FT ID 0x%08x with offset: %dms", *long_rd_id, *offset);
         return 0;
     }
 

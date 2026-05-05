@@ -44,13 +44,13 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
-#define DECT_FT_LONG_RD_ID 				0x12345678U // Change this for each FT
-#define DECT_SINK_LONG_RD_ID 			0x67214200U
-#define DECT_PT_LONG_RD_ID				0x11223344U // Change this for each PT
+#define DECT_FT_LONG_RD_ID 				0x12345678U // FT relay (change this for each FT)
+#define DECT_SINK_LONG_RD_ID 			0x67214200U // FT sink
+#define DECT_PT_LONG_RD_ID				0x11223344U // PT relay (change this for each PT)
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SYNC_T_SIZE						4
@@ -664,9 +664,12 @@ static void rx_thread(void)
 			.num_links = ++route_delays_idx,
 		};
 
+		LOG_INF("Cumulative delays:");
 		for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
 			delay_information.per_link_delay[i] = pkt_recv->route_delays.per_link_delay[i];
 			delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
+		
+			LOG_INF("  Link %d: %u", i+1, delay_information.per_link_delay[i]);
 		}
 		delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
 		delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
@@ -735,6 +738,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 		
 		// Time/delays related
 		packet->timestamp_pt = time_tx;
+		packet->offset_pt_to_ft = SYNC_offset_parent;
 		packet->route_delays = delay_information;
 	
 		// Payload
@@ -1019,6 +1023,12 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	int32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
 	// sibling_ft_offset // O_CB
 	uint32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
+	
+	LOG_INF("current_delay: %u", current_delay);
+	LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
+	LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft); // TODO: Fix this black sheep
+	LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
 
 	// Update values in struct
 	struct hop_delays delay_information = {
@@ -1029,10 +1039,14 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 		delay_information.per_link_delay[i] = meta->route_delays.per_link_delay[i];
 		delay_information.devices_visited[i] = meta->route_delays.devices_visited[i];
 	}
-
-
+	
 	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
 	delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
+	
+	LOG_INF("Cumulative delays:");
+	for (int i = 0; i <= route_delays_idx; i++) {
+		LOG_INF("  Link %d: %ums", i+1, delay_information.per_link_delay[i]);
+	}
 
     LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", data_size, parent_long_rd_id);
 	tx_img_data(data, data_size, delay_information, parent_long_rd_id);
@@ -1459,7 +1473,6 @@ int main(void)
     	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
 			uint32_t T0 = k_uptime_get_32();
 			uart_handshake_send_id_timestamp(current_long_rd_id, T0);
-			// TODO: Send timestamp here
     	#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
         	if (uart_handshake_receive_id_timestamp(&sibling_ft_long_rd_id, &sibling_ft_offset, 30)) {
             	LOG_ERR("No sibling FT ID received, scanning without filter");
