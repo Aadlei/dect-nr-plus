@@ -13,28 +13,26 @@ state "<b>Common resources</b>" as Common
 state "<b>Thread main</b>" as Main
 state "<b>Setup</b>" as Main_Setup: <i>DECT, device and main setup</i>
 state Main_Setup {
-  state "<b>Start UART thread</b>" as Main_Thread_UART
-  state "<b>R-SYNC</b>" as Main_RSYNC: <i>Start Relay-SYNC process as FT</i>
-  state "<b>Open sockets</b>" as Main_Sockets: <i>Open TX and RX sockets</i>
-  state "<b>Start FT thread</b>" as Main_Thread_FT
+  state "<b>Start thread UART</b>" as Main_Thread_UART
+  state "<b>Open common sockets</b>" as Main_Sockets: <i>Open common TX and RX sockets</i>
+  state "<b>Start thread FT</b>" as Main_Thread_FT
 
   [*]--> Main_Thread_UART
-  Main_Thread_UART --> Main_RSYNC: Relay\ndevice
-  Main_Thread_UART --> Main_Sockets: Edge\ndevice
-  Main_RSYNC --> Main_RSYNC: Timeout\n(<b>n</b> retries)
-  Main_RSYNC --> Main_Sockets: SYNC\nsuccess
+  Main_Thread_UART --> Main_Sockets: None
   Main_Sockets --> Main_Thread_FT: None
-  Main_RSYNC --> [*]: SYNC\nfail
 }
 
 state "<b>Main idle</b>" as Main_Idle: <i>Listen for data on RX socket</i>
+state "<b>Extend packet</b>" as Main_Extend: <i>Add delay information to packet</i>
 state "<b>UART queue</b>" as Main_UART_Send: <i>Queue data to send on UART</i>
 
 [*] --> Main
 Main --> Main_Setup: None
 Main_Setup --> Main_Idle: None
 Main_Idle --> Main_Idle: Other data received
-Main_Idle --> Main_UART_Send: Image data\nreceived
+Main_Idle --> Main_Extend: Image data received\n(Edge device)
+Main_Idle --> Main_UART_Send: Image data received\n(Relay device)
+Main_Extend --> Main_UART_Send: None
 Main_UART_Send --> Main_Idle: None
 
 'FT thread'
@@ -60,16 +58,15 @@ FT_Assoc_Drop --> FT_Assoc_Idle: None
 
 'UART thread'
 state "<b>Thread UART</b>" as UART
-state "<b>UART init</b>" as UART_Init: <i>Initialize UART connection</i>
+state "<b>UART handshake</b>" as UART_Handshake: <i>Perform handshake over UART with SYNC timestamp</i>
 state "<b>UART idle</b>" as UART_Idle: <i>Wait for data to send over UART</i>
 state "<b>UART send</b>" as UART_Send: <i>Send queued data over UART</i>
-
-UART --> UART_Init: None
-UART_Init --> UART_Idle: None
+ø
+UART --> UART_Handshake: None
+UART_Handshake --> UART_Idle: Handshake\nsuccess
+UART_Handshake --> UART_Handshake: Handshake\nfail
 UART_Idle --> UART_Send: Non-empty\nqueue
 UART_Send --> UART_Send: Non-empty\nqueue
 UART_Send --> UART_Idle: Empty\nqueue
 
 @enduml
-
-'Problem: UART er en thread, men SYNC process må skje over UART. Altså må thread startes, gjøre R-SYNC, også vanlig etter det.'

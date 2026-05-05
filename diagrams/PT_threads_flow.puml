@@ -15,10 +15,14 @@ state "<b>Common resources</b>" as Common
 state "<b>Thread main</b>" as Main
 state "<b>Setup</b>" as Main_Setup: <i>DECT, device and main setup</i>
 state Main_Setup {
+  state "<b>Start UART thread</b>" as Main_UART
   state "<b>Open sockets</b>" as Main_Sockets: <i>Open TX and RX sockets</i>
-  state "<b>Start PT thread</b>" as Main_Thread_PT
-  state "<b>Start SPI thread</b>" as Main_Thread_SPI
+  state "<b>Start thread PT</b>" as Main_Thread_PT
+  state "<b>Start thread SPI</b>" as Main_Thread_SPI
 
+  [*] --> Main_UART: Relay\ndevice
+  [*] --> Main_Sockets: Edge\ndevice
+  Main_UART --> Main_Sockets: None
   Main_Sockets --> Main_Thread_PT: None
   Main_Thread_PT --> Main_Thread_SPI: None
 }
@@ -65,5 +69,18 @@ SPI --> SPI_Init: None
 SPI_Init --> SPI_Idle: None
 SPI_Idle --> SPI_Update: New\nMISO data
 SPI_Update --> SPI_Idle: None
+
+'UART thread'
+state "<b>Thread UART</b>" as UART
+state "<b>UART handshake</b>" as UART_Handshake: <i>Perform handshake over UART with SYNC offset calculation</i>
+state "<b>UART idle</b>" as UART_Idle: <i>Wait for data to send over UART</i>
+state "<b>UART send</b>" as UART_Send: <i>Send queued data over UART</i>
+
+UART --> UART_Handshake: None
+UART_Handshake --> UART_Idle: Handshake\nsuccess
+UART_Handshake --> UART_Handshake: Handshake\nfail
+UART_Idle --> UART_Send: Non-empty\nqueue
+UART_Send --> UART_Send: Non-empty\nqueue
+UART_Send --> UART_Idle: Empty\nqueue
 
 @enduml
