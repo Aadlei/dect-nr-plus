@@ -14,7 +14,7 @@ static const struct device *gpio_dev;
 #define SPI_NODE DT_NODELABEL(spi2)
 #define TX_BUFFER_SIZE 1024
 #define CHUNK_SIZE 4096
-#define MAX_IMAGE_SIZE 32768
+#define MAX_IMAGE_SIZE 16384
 
 K_THREAD_STACK_DEFINE(spi_slave_stack, 6144);
 static struct k_thread spi_slave_thread_data;

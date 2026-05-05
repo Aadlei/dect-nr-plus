@@ -295,50 +295,60 @@ void uart_queue_chunk(struct rx_chunk *c) { k_fifo_put(&pending_chunks, c); }
 
 static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
 {
-    static uint8_t payload_copy[CHUNK_BUF_SIZE];
-    uint16_t expected_total = 0;
-    uint16_t received_count = 0;
+    static uint8_t payload_copy[MAX_PAYLOAD_SIZE];
+    uint16_t expected_total   = 0;
+    uint16_t next_expected_idx = 0;
 
-    while (1)
-    {
+    while (1) {
         struct rx_chunk *chunk = k_fifo_get(&pending_chunks, K_FOREVER);
         struct data_packet *pkt = (struct data_packet *)chunk->data;
 
-        // Copy everything we need out of the chunk
-        uint16_t packet_idx   = pkt->packet_idx;
+        uint16_t packet_idx    = pkt->packet_idx;
         uint16_t total_packets = pkt->total_packets;
-        uint16_t payload_len  = pkt->payload_len;
-        
-        uint32_t total_size   = pkt->total_data_size;
+        uint16_t payload_len   = pkt->payload_len;
+        uint32_t total_size    = pkt->total_data_size;
         memcpy(payload_copy, pkt->payload, payload_len);
-
-        // Return chunk immediately before slow UART TX
         k_fifo_put(&free_chunks, chunk);
 
-        if (packet_idx == 0)
-        {
-            expected_total = total_packets;
-            received_count = 0;
+        if (packet_idx == 0) {
+            if (stream_active) {
+                LOG_WRN("Aborting stale stream, new image starting");
+                uart_stream_end();
+            }
+            expected_total    = total_packets;
+            next_expected_idx = 0;
+
             struct packet_metadata meta = {
-                .seq_num = message_counter++,
-                .timestamp_pt = pkt->timestamp_pt,
+                .seq_num         = message_counter++,
+                .timestamp_pt    = pkt->timestamp_pt,
                 .offset_pt_to_ft = pkt->offset_pt_to_ft,
-                .route_delays = pkt->route_delays,
+                .route_delays    = pkt->route_delays,
             };
             uart_stream_begin(total_size, &meta);
         }
+        if (packet_idx != next_expected_idx) {
+            LOG_ERR("Gap: expected chunk %u, got %u — dropping image",
+                    next_expected_idx, packet_idx);
+            if (stream_active) {
+                uart_stream_end();
+            }
+            expected_total    = 0;
+            next_expected_idx = 0;
+            continue;
+        }
 
         uart_stream_chunk(payload_copy, payload_len);
-        received_count++;
+        next_expected_idx++;
 
-        if (received_count >= expected_total && expected_total > 0)
-        {
+        if (next_expected_idx >= expected_total && expected_total > 0) {
             uart_stream_end();
-            expected_total = 0;
-            received_count = 0;
+            expected_total    = 0;
+            next_expected_idx = 0;
         }
     }
 }
+
+
 int uart_tx_thread_start(void)
 {
     uart_callback_set(uart_dev, uart_tx_async_cb, NULL);  // add this
