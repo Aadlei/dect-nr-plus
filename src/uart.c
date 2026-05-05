@@ -337,6 +337,7 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             continue;
         }
 
+        // TODO: Do byte stuffing somewhere around here
         uart_stream_chunk(payload_copy, payload_len);
         next_expected_idx++;
 

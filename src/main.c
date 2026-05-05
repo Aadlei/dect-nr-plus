@@ -704,7 +704,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 	}
 
 	// Send chunks to destination
-	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
+	uint16_t total_chunks = (image_size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
 
 	if (common_socket < 0)
 	{
