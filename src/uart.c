@@ -9,7 +9,8 @@ LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 // MAGIC_0, MAGIC_1, MAGIC_0, MAGIC_1
 // struct packet_metadata
 // total packet size
-#define STREAM_HEADER_SIZE (4 + sizeof(size_t) + (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS))) // 4 magic bytes + data size + packet_metadata to bytes
+#define STREAM_HEADER_SIZE (4 + 4 + (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS)))
+// 4 magic bytes + 4 byte data size + packet_metadata to bytes
 
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
@@ -177,6 +178,7 @@ static void uart_out_bytes(const uint8_t *data, size_t len)
     int ret = uart_tx(uart_dev, data, len, SYS_FOREVER_US);
     if (ret) {
         LOG_ERR("uart_tx failed: %d", ret);
+        stream_active = false;
         return;
     }
     k_sem_take(&uart_tx_done_sem, K_FOREVER);
@@ -303,11 +305,15 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         struct rx_chunk *chunk = k_fifo_get(&pending_chunks, K_FOREVER);
         struct data_packet *pkt = (struct data_packet *)chunk->data;
 
-        uint16_t packet_idx    = pkt->packet_idx;
-        uint16_t total_packets = pkt->total_packets;
-        uint16_t payload_len   = pkt->payload_len;
-        uint32_t total_size    = pkt->total_data_size;
+        uint16_t packet_idx     = pkt->packet_idx;
+        uint16_t total_packets  = pkt->total_packets;
+        uint16_t payload_len    = pkt->payload_len;
+        uint32_t total_size     = pkt->total_data_size;
+        uint32_t timestamp_pt   = pkt->timestamp_pt;
+        int32_t offset_pt_to_ft = pkt->offset_pt_to_ft;
+        struct hop_delays route_delays = pkt->route_delays;
         memcpy(payload_copy, pkt->payload, payload_len);
+
         k_fifo_put(&free_chunks, chunk);
 
         if (packet_idx == 0) {
@@ -320,9 +326,9 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
 
             struct packet_metadata meta = {
                 .seq_num         = message_counter++,
-                .timestamp_pt    = pkt->timestamp_pt,
-                .offset_pt_to_ft = pkt->offset_pt_to_ft,
-                .route_delays    = pkt->route_delays,
+                .timestamp_pt    = timestamp_pt,
+                .offset_pt_to_ft = offset_pt_to_ft,
+                .route_delays    = route_delays,
             };
             uart_stream_begin(total_size, &meta);
         }
@@ -415,6 +421,8 @@ static uint32_t   rx_payload_received;
 static uint8_t    rx_crc_bytes[2];
 static uint8_t    rx_crc_idx;
 static uint16_t   rx_running_crc;
+
+BUILD_ASSERT(sizeof(rx_header) >= (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS))); // Change this based on stream header
 
 /* Work item for deferred callback (ISR -> thread context) */
 struct rx_frame_work_t {

@@ -28,7 +28,6 @@ static size_t total_received = 0;
 static size_t image_size = 0;
 static bool new_image_available = false;
 static bool receiving_image = false;
-static bool ready_for_image = false;  // Tracks whether we should accept new images
 K_MUTEX_DEFINE(image_mutex);
 
 static struct spi_config spi_cfg = {
@@ -58,6 +57,8 @@ static struct spi_buf_set rx_buf_set = {
     .count = 1};
 static bool find_jpeg_end(uint8_t *buffer, size_t len, size_t *end_pos)
 {
+    if (len < 2) return false;
+
     for (size_t i = 0; i < len - 1; i++)
     {
         if (buffer[i] == 0xFF && buffer[i + 1] == 0xD9)
@@ -215,6 +216,10 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     }
 }
 
+// Potential risk/problem: Caller can read from image_buffer whilst it is being written
+// Explicitly handled: Master will not send new data before slave has transmitted and lowered the pin for flow control
+// Fix 1: Mutex for entire TX operation
+// Fix 2: Copy the image to another buffer to avoid race condition
 uint8_t *spi_slave_get_image_buffer(void)
 {
     return image_buffer;

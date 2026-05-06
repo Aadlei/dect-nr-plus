@@ -44,7 +44,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -610,6 +610,13 @@ static void rx_thread(void)
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
+	struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
+	if (!pkt_recv)
+	{
+		LOG_ERR("Failed to allocate memory for RX buffer");
+		return;
+	}
+
     while (true)
 	{
 		if (common_socket < 0)
@@ -618,8 +625,6 @@ static void rx_thread(void)
 			k_sleep(K_SECONDS(1));
 			continue;
 		}
-
-		struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
 		
 		// RX
         ret = recvfrom(common_socket, pkt_recv, CHUNK_BUF_SIZE, 0,
@@ -627,7 +632,6 @@ static void rx_thread(void)
 
 		if (ret < 0)
 		{
-			free(pkt_recv);
 			LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
 			k_sleep(K_SECONDS(1));
 			continue;
@@ -635,7 +639,6 @@ static void rx_thread(void)
 
 		if (ret < (int)sizeof(struct data_packet))
 		{
-			free(pkt_recv);
 			LOG_WRN("Packet too small: %d bytes", ret);
 			continue;
 		}
@@ -649,7 +652,6 @@ static void rx_thread(void)
 
 		if (route_delays_idx >= ROUTING_MAX_HOPS - 1) {
 			LOG_ERR("route_delays_idx %d out of bounds, dropping chunk", route_delays_idx);
-			free(pkt_recv);
 			continue;
 		}
 
@@ -677,12 +679,12 @@ static void rx_thread(void)
 		struct rx_chunk *chunk = uart_get_free_chunk();
 		memcpy(chunk->data, pkt_recv, ret);
 
-		free(pkt_recv); // Free the malloc from earlier
-
 		chunk->data_len = ret;
 
         uart_queue_chunk(chunk);
     }
+
+	free(pkt_recv); // Never reached because of infinite loop, but just in case
 }
 
 static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
@@ -794,6 +796,7 @@ static uint32_t get_parent_long_rd_id(void)
 		return 0;
 	}
 
+	if (dev_info.parent_count == 0) return 0;
 	return dev_info.parent_associations->long_rd_id;
 }
 
@@ -1069,8 +1072,8 @@ static void run_as_ft(void)
 	int success = SYNC_ft_operation();
 	while (success < 0)
 	{
-		success = SYNC_ft_operation();
 		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
+		success = SYNC_ft_operation();
 	}
 	close_SYNC_socket(); // Close SYNC sockets when done to spare resources
 
