@@ -49,8 +49,8 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
 #define DECT_FT_LONG_RD_ID 				0x12345678U // FT relay (change this for each FT)
-#define DECT_SINK_LONG_RD_ID 			0x67214200U // FT sink
 #define DECT_PT_LONG_RD_ID				0x11223344U // PT relay (change this for each PT)
+#define DECT_SINK_LONG_RD_ID 			0x67214200U // FT sink
 
 #define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
 #define SYNC_T_SIZE						4
@@ -716,7 +716,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 
 	uint32_t time_tx = k_uptime_get_32(); // PT edge: Time at the start of TX of all chunks
 
-	for (uint16_t i=0; i < total_chunks; i++)
+	for (uint16_t i = 0; i < total_chunks; i++)
 	{
 		size_t data_offset = i * MAX_PAYLOAD_SIZE;
 		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - data_offset);
@@ -1301,11 +1301,11 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+		/* if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
 			break;
-		}
+		} */
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
@@ -1386,6 +1386,13 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 int main(void)
 {
 	int ret;
+
+	// Read reset fields
+	uint32_t reset_reason = NRF_POWER->RESETREAS;
+	LOG_WRN("Reset reason before clearing: 0x%08x", reset_reason);
+	NRF_POWER->RESETREAS = reset_reason;
+	reset_reason = NRF_POWER->RESETREAS;
+	LOG_WRN("Reset register after clearing: 0x%08x", reset_reason);
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 

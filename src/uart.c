@@ -6,11 +6,10 @@
 LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 
 // STREAM HEADER:
-// MAGIC_0, MAGIC_1, MAGIC_0, MAGIC_1
-// struct packet_metadata
-// total packet size
-#define STREAM_HEADER_SIZE (4 + 4 + (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS)))
-// 4 magic bytes + 4 byte data size + packet_metadata to bytes
+// MAGIC_0, MAGIC_1, MAGIC_0, MAGIC_1: 4 bytes
+// total packet size: 4 bytes
+// struct packet_metadata: 4 + 4 + 4 + DELAY_HEADER_SIZE(65) bytes
+#define STREAM_HEADER_SIZE (4 + 4 + (4 + 4 + 4 + DELAY_HEADER_SIZE))
 
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
@@ -62,7 +61,7 @@ int uart_handshake_init(void)
     return 0;
 }
 
-int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp)
+int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp) // TODO: Take timestamp here instead
 {
     uint8_t *id = (uint8_t *)&long_rd_id;
     uint8_t *ts = (uint8_t *)&timestamp;
@@ -105,8 +104,12 @@ static void handshake_async_cb(const struct device *dev,
         for (uint32_t i = 0; i <= len - 10; i++) { // TODO: Remove this magic number
             if (d[i] == HANDSHAKE_MAGIC_0 && d[i + 1] == HANDSHAKE_MAGIC_1) {
                 memcpy(&sibling_ft_timestamp, &d[i + 2], 4); // Bytes 2-5: timestamp
-                memcpy(&handshake_rx_id, &d[i + 6], 4); // Bytes: 6-9: long RD ID 
-                handshake_rx_offset = (int32_t)sibling_ft_timestamp - (int32_t)current_pt_timestamp; // Offset from the POV of the FT
+                memcpy(&handshake_rx_id, &d[i + 6], 4); // Bytes: 6-9: long RD ID
+                LOG_INF("Timestamps:");
+                LOG_INF("  sibling_ft_timestamp: %u", sibling_ft_timestamp);
+                LOG_INF("  current_pt_timestamp: %u", current_pt_timestamp);
+                handshake_rx_offset = (int32_t)sibling_ft_timestamp - (int32_t)current_pt_timestamp; // Offset from the POV of the PT
+                LOG_INF("  handshake_rx_offset: %d", handshake_rx_offset);
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);
                 return;
@@ -229,9 +232,6 @@ int uart_stream_begin(size_t total_length, const struct packet_metadata *meta)
         (meta->offset_pt_to_ft >> 16) & 0xFF,
         (meta->offset_pt_to_ft >> 24) & 0xFF,
         meta->route_delays.num_links,
-        // devices_visited
-        // per_link_delay
-        // total_length
     };
 
     int header_idx = 21; // Count number of elements in above array
@@ -343,7 +343,6 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             continue;
         }
 
-        // TODO: Do byte stuffing somewhere around here
         uart_stream_chunk(payload_copy, payload_len);
         next_expected_idx++;
 
@@ -422,7 +421,7 @@ static uint8_t    rx_crc_bytes[2];
 static uint8_t    rx_crc_idx;
 static uint16_t   rx_running_crc;
 
-BUILD_ASSERT(sizeof(rx_header) >= (4 + 4 + 4 + (1 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS))); // Change this based on stream header
+BUILD_ASSERT(sizeof(rx_header) >= (4 + 4 + 4 + (DELAY_HEADER_SIZE))); // Change this based on STREAM_HEADER_SIZE
 
 /* Work item for deferred callback (ISR -> thread context) */
 struct rx_frame_work_t {

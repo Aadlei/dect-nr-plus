@@ -5,7 +5,8 @@
 #include <stdint.h>
 
 #define ROUTING_MAX_HOPS	8
-#define PACKET_HEADER_SIZE  (18 + 4 * ROUTING_MAX_HOPS + 4 * ROUTING_MAX_HOPS) // data_packet fields + hop_delays arrays
+#define DELAY_HEADER_SIZE   1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS)
+#define PACKET_HEADER_SIZE  2 + 2 + 4 + 4 + 4 + DELAY_HEADER_SIZE + 2
 #define MAX_PAYLOAD_SIZE    1024
 #define CHUNK_BUF_SIZE      (PACKET_HEADER_SIZE + MAX_PAYLOAD_SIZE) // data_packet header + payload 
 #define CHUNK_POOL_COUNT    16
@@ -36,7 +37,7 @@ struct packet_metadata {
 struct data_packet {
     uint16_t packet_idx;
     uint16_t total_packets;
-    size_t total_data_size;
+    size_t total_data_size; // Potential problem, since size_t size is platform dependent
     uint32_t timestamp_pt; // NOTE: Timestamp for the start of TX of first chunk
     int32_t offset_pt_to_ft; // Offset between PT and FT (DECT)
     struct hop_delays route_delays;

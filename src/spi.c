@@ -57,6 +57,8 @@ static struct spi_buf_set rx_buf_set = {
     .count = 1};
 static bool find_jpeg_end(uint8_t *buffer, size_t len, size_t *end_pos)
 {
+    bool found = false;
+    
     if (len < 2) return false;
 
     for (size_t i = 0; i < len - 1; i++)
@@ -64,10 +66,10 @@ static bool find_jpeg_end(uint8_t *buffer, size_t len, size_t *end_pos)
         if (buffer[i] == 0xFF && buffer[i + 1] == 0xD9)
         {
             *end_pos = i + 2; // Position after EOI marker
-            return true;
+            found = true;
         }
     }
-    return false;
+    return found;
 }
 
 int spi_slave_init(void)
@@ -170,8 +172,8 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
                 {
                     memcpy(image_buffer + total_received, rx_buffer, ret);
                     total_received += ret;
-                    // LOG_INF("Chunk %d bytes (total: %zu/%d)",
-                    //        ret, total_received, MAX_IMAGE_SIZE);
+                    LOG_INF("Chunk %d bytes (total: %zu/%d)",
+                            ret, total_received, MAX_IMAGE_SIZE);
 
                     // Check if this chunk contains JPEG EOI marker
                     if (find_jpeg_end(rx_buffer, ret, &eoi_pos))
@@ -187,21 +189,21 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
                         new_image_available = true;
                         k_mutex_unlock(&image_mutex);
                         
-                        // LOG_INF("=== Image complete! ===");
-                        // LOG_INF("Total size: %zu bytes", actual_size);
+                        LOG_INF("=== Image complete! ===");
+                        LOG_INF("Total size: %zu bytes", actual_size);
 
-                        // // Print entire image as hex dump (first 128 bytes)
-                        // LOG_INF("First 128 bytes:");
-                        // LOG_HEXDUMP_INF(image_buffer,
-                        //                 (actual_size > 128) ? 128 : actual_size,
-                        //                 "Image data:");
+                        // Print entire image as hex dump (first 128 bytes)
+                        LOG_INF("First 128 bytes:");
+                        LOG_HEXDUMP_INF(image_buffer,
+                                        (actual_size > 128) ? 128 : actual_size,
+                                        "Image data:");
 
                         // Print last 32 bytes (should contain FF D9)
                         if (actual_size > 32)
                         {
-                            // LOG_INF("Last 32 bytes:");
-                            // LOG_HEXDUMP_INF(image_buffer + actual_size - 32, 32,
-                            //                 "Image end:");
+                            LOG_INF("Last 32 bytes:");
+                            LOG_HEXDUMP_INF(image_buffer + actual_size - 32, 32,
+                                            "Image end:");
                         }
                     }
                 }

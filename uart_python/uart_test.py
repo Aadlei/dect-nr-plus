@@ -144,6 +144,9 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                 print(f"  timestamp_pt={hdr['timestamp_pt']}  offset_pt_to_ft={hdr['offset_pt_to_ft']}")
                 print(f"  devices_visited={[hex(d) for d in hdr['devices_visited']]}")
                 print(f"  per_link_delay={hdr['per_link_delay']}")
+                magic_in_payload = payload.count(MAGIC)
+                if magic_in_payload > 0:
+                    print(f"  WARNING: Magic found {magic_in_payload} times in payload!")
 
                 if mqtt_client:
                     mqtt_data = {
@@ -175,7 +178,8 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
 def main():
     parser = argparse.ArgumentParser(
         description="Receive images from nRF9151 DK and publish via MQTT")
-    parser.add_argument("--port", default="/dev/ttyUSB0",
+    # parser.add_argument("--port", default="/dev/ttyUSB0",
+    parser.add_argument("--port", default="COM3",
                         help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", type=int, default=1000000,
                         help="Baud rate (default: 1000000)")
