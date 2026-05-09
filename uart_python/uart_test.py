@@ -1,8 +1,8 @@
 """
 nRF9151 DK Image Receiver with MQTT Publishing
-Wire format (85-byte header):
+Wire format (93-byte header):
   [MAGIC:4][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
-  [num_links:1][devices_visited:32][per_link_delay:32]
+  [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
   [payload:total_length][crc16:2]
 CRC covers header[4:] + payload.
 """
@@ -18,8 +18,11 @@ ROUTING_MAX_HOPS = 8
 MAGIC = b'\xAA\x55\xAA\x55'
 
 # Header size: 4 magic + 4 length + 4 seq + 4 timestamp + 4 offset + 1 num_links
-#              + 4*8 devices_visited + 4*8 per_link_delay = 85 bytes
-HEADER_SIZE = 4 + 4 + 4 + 4 + 4 + 1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS)
+#              + 4*8 devices_visited + 4*8 per_link_delay + 1*8 per_link_rssi = 93 bytes
+HEADER_SIZE = (4 + 4 + 4 + 4 + 4 + 1
+               + (4 * ROUTING_MAX_HOPS)
+               + (4 * ROUTING_MAX_HOPS)
+               + (1 * ROUTING_MAX_HOPS))
 
 def crc16(data: bytes) -> int:
     crc = 0xFFFF
@@ -41,6 +44,7 @@ def parse_header(buf):
     num_links       = buf[20]
     devices_visited = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, 21))
     per_link_delay  = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, 21 + 4 * ROUTING_MAX_HOPS))
+    per_link_rssi   = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}b', buf, 21 + 8 * ROUTING_MAX_HOPS))  # signed bytes
     return {
         'total_length':    total_length,
         'seq_num':         seq_num,
@@ -49,6 +53,7 @@ def parse_header(buf):
         'num_links':       num_links,
         'devices_visited': devices_visited[:num_links + 1],
         'per_link_delay':  per_link_delay[:num_links + 1],
+        'per_link_rssi':   per_link_rssi[:num_links + 1],
     }
 
 def print_log(data: bytes):
@@ -144,6 +149,7 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                 print(f"  timestamp_pt={hdr['timestamp_pt']}  offset_pt_to_ft={hdr['offset_pt_to_ft']}")
                 print(f"  devices_visited={[hex(d) for d in hdr['devices_visited']]}")
                 print(f"  per_link_delay={hdr['per_link_delay']}")
+                print(f"  per_link_rssi={hdr['per_link_rssi']} dBm")
                 magic_in_payload = payload.count(MAGIC)
                 if magic_in_payload > 0:
                     print(f"  WARNING: Magic found {magic_in_payload} times in payload!")
@@ -161,6 +167,7 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                         "offset_pt_to_ft":  hdr['offset_pt_to_ft'],
                         "devices_visited":  hdr['devices_visited'],
                         "per_link_delay":   hdr['per_link_delay'],
+                        "per_link_rssi":    hdr['per_link_rssi'],
                     }
                     mqtt_client.publish("images/metadata", json.dumps(mqtt_data), qos=1)
                     mqtt_client.publish("images/data", payload, qos=1)
@@ -178,7 +185,6 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
 def main():
     parser = argparse.ArgumentParser(
         description="Receive images from nRF9151 DK and publish via MQTT")
-    # parser.add_argument("--port", default="/dev/ttyUSB0",
     parser.add_argument("--port", default="/dev/ttyUSB0",
                         help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", type=int, default=1000000,

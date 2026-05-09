@@ -45,7 +45,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -58,7 +58,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
 #define WORK_RESCHEDULE_TIME_SEC 		10
-
+#define RSSI_CACHE_SIZE ROUTING_MAX_HOPS
 
 static struct in6_addr mesh_prefix;
 
@@ -206,6 +206,56 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application");
 }
 
+static struct {
+    uint32_t long_rd_id;
+    int8_t   rssi;
+} rssi_cache[RSSI_CACHE_SIZE];
+ 
+static void rssi_cache_update(uint32_t long_rd_id, int8_t rssi)
+{
+    /* Overwrite existing entry for this peer, or use first empty slot. */
+    for (int i = 0; i < RSSI_CACHE_SIZE; i++) {
+        if (rssi_cache[i].long_rd_id == long_rd_id || rssi_cache[i].long_rd_id == 0) {
+            rssi_cache[i].long_rd_id = long_rd_id;
+            rssi_cache[i].rssi = rssi;
+            return;
+        }
+    }
+    /* Cache full — overwrite slot 0 as fallback. */
+    rssi_cache[0].long_rd_id = long_rd_id;
+    rssi_cache[0].rssi = rssi;
+}
+ 
+static int8_t rssi_cache_get(uint32_t long_rd_id)
+{
+    for (int i = 0; i < RSSI_CACHE_SIZE; i++) {
+        if (rssi_cache[i].long_rd_id == long_rd_id) {
+            return rssi_cache[i].rssi;
+        }
+    }
+    return 0; /* unknown */
+}
+
+static int8_t get_rx_rssi(const struct sockaddr_in6 *src_addr)
+{
+    uint32_t long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr->sin6_addr);
+    if (long_rd_id == 0) {
+        return 0;
+    }
+ 
+    /* Trigger async refresh — result arrives via NET_EVENT_DECT_NEIGHBOR_INFO. */
+    struct dect_neighbor_info_req_params params = {
+        .long_rd_id = long_rd_id,
+    };
+    int ret = net_mgmt(NET_REQUEST_DECT_NEIGHBOR_INFO, dect_iface, &params, sizeof(params));
+    if (ret) {
+        LOG_WRN("Neighbor info request failed: %d", ret);
+    }
+ 
+    return rssi_cache_get(long_rd_id);
+}
+
+
 // Function declarations
 #if defined(CONFIG_DK_LIBRARY)
 static void button_handler(uint32_t button_states, uint32_t has_changed)
@@ -302,83 +352,91 @@ static void rx_thread(void)
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
-	struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
-	if (!pkt_recv)
-	{
-		LOG_ERR("Failed to allocate memory for RX buffer");
-		return;
-	}
+    struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
+    if (!pkt_recv)
+    {
+        LOG_ERR("Failed to allocate memory for RX buffer");
+        return;
+    }
 
     while (true)
-	{
-		if (common_socket < 0)
-		{
-			LOG_WRN("Common socket not open. Sleeping for 1 second...");
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
-		
-		// RX
+    {
+        if (common_socket < 0)
+        {
+            LOG_WRN("Common socket not open. Sleeping for 1 second...");
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
+
         ret = recvfrom(common_socket, pkt_recv, CHUNK_BUF_SIZE, 0,
-			(struct sockaddr *)&src_addr, &addr_len);
+            (struct sockaddr *)&src_addr, &addr_len);
 
-		if (ret < 0)
-		{
-			LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
+        if (ret < 0)
+        {
+            LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
 
-		if (ret < (int)sizeof(struct data_packet))
-		{
-			LOG_WRN("Packet too small: %d bytes", ret);
-			continue;
-		}
-		
-		LOG_INF("Chunk %d/%d (%d bytes)",
+        if (ret < (int)sizeof(struct data_packet))
+        {
+            LOG_WRN("Packet too small: %d bytes", ret);
+            continue;
+        }
+
+        LOG_INF("Chunk %d/%d (%d bytes)",
             pkt_recv->packet_idx + 1, pkt_recv->total_packets, pkt_recv->payload_len);
-			
-		// If this is sink, update delay information
-		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		uint8_t route_delays_idx = pkt_recv->route_delays.num_links;
 
-		if (route_delays_idx >= ROUTING_MAX_HOPS - 1) {
-			LOG_ERR("route_delays_idx %d out of bounds, dropping chunk", route_delays_idx);
-			continue;
-		}
+        #if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        {
+            uint8_t rssi_idx = pkt_recv->route_delays.num_links;
+            if (rssi_idx < ROUTING_MAX_HOPS) {
+                pkt_recv->route_delays.per_link_rssi[rssi_idx] = get_rx_rssi(&src_addr);
+            }
+        }
+        #endif
 
-		uint32_t current_delay = pkt_recv->route_delays.per_link_delay[route_delays_idx];
-		uint32_t ft_this_timestamp = k_uptime_get_32(); // T_B
-		uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt; // T_A
-		int32_t offset_pt_to_ft = pkt_recv->offset_pt_to_ft; // O_AB
-		uint32_t cumulative_delay = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
+        /* Sink FT: stamp delay and RSSI for the final incoming hop. */
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        uint8_t route_delays_idx = pkt_recv->route_delays.num_links;
 
-		// Update values in struct
-		struct hop_delays delay_information = {
-			.num_links = ++route_delays_idx,
-		};
+        if (route_delays_idx >= ROUTING_MAX_HOPS - 1) {
+            LOG_ERR("route_delays_idx %d out of bounds, dropping chunk", route_delays_idx);
+            continue;
+        }
 
-		for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-			delay_information.per_link_delay[i] = pkt_recv->route_delays.per_link_delay[i];
-			delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
-		}
-		delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
-		delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
+        uint32_t current_delay     = pkt_recv->route_delays.per_link_delay[route_delays_idx];
+        uint32_t ft_this_timestamp = k_uptime_get_32();          // T_B
+        uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
+        int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
+        uint32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
-		pkt_recv->route_delays = delay_information;
-		#endif
+        int8_t rx_rssi = get_rx_rssi(&src_addr);
 
-		struct rx_chunk *chunk = uart_get_free_chunk();
-		memcpy(chunk->data, pkt_recv, ret);
+        struct hop_delays delay_information = {
+            .num_links = ++route_delays_idx,
+        };
 
-		chunk->data_len = ret;
+        for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+            delay_information.per_link_delay[i]  = pkt_recv->route_delays.per_link_delay[i];
+            delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
+            delay_information.per_link_rssi[i]   = pkt_recv->route_delays.per_link_rssi[i];
+        }
+        delay_information.per_link_delay[route_delays_idx]  = cumulative_delay;
+        delay_information.devices_visited[route_delays_idx] = current_long_rd_id;
+        delay_information.per_link_rssi[route_delays_idx]   = rx_rssi; 
 
+        pkt_recv->route_delays = delay_information;
+        #endif
+
+        struct rx_chunk *chunk = uart_get_free_chunk();
+        memcpy(chunk->data, pkt_recv, ret);
+        chunk->data_len = ret;
         uart_queue_chunk(chunk);
     }
 
-	free(pkt_recv); // Never reached because of infinite loop, but just in case
+    free(pkt_recv);
 }
-
 static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
 {
 	int ret = -1;
@@ -729,8 +787,9 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	};
 	
 	for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-		delay_information.per_link_delay[i] = meta->route_delays.per_link_delay[i];
+		delay_information.per_link_delay[i]  = meta->route_delays.per_link_delay[i];
 		delay_information.devices_visited[i] = meta->route_delays.devices_visited[i];
+		delay_information.per_link_rssi[i]   = meta->route_delays.per_link_rssi[i]; // add this
 	}
 	
 	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
@@ -1074,6 +1133,25 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		break;
 
+	case NET_EVENT_DECT_NEIGHBOR_INFO: {
+        const struct dect_neighbor_info_evt *info = cb->info;
+ 
+        if (info->status != DECT_STATUS_OK) {
+            LOG_WRN("Neighbor info failed for 0x%08x: %d", info->long_rd_id, info->status);
+            break;
+        }
+ 
+        int8_t rssi = info->last_rx_signal_info.rssi_2;
+        rssi_cache_update(info->long_rd_id, rssi);
+ 
+        LOG_DBG("RSSI cache update: 0x%08x → %d dBm (SNR %d dB, MCS %u)",
+                info->long_rd_id, rssi,
+                info->last_rx_signal_info.snr,
+                info->last_rx_signal_info.mcs);
+        break;
+    }
+
+
     default:
         LOG_WRN("Unhandled DECT event: 0x%llx", event);
         break;
@@ -1113,12 +1191,14 @@ int main(void)
 
 	// Setup callbacks for DECT event callbacks
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-		NET_EVENT_DECT_NETWORK_STATUS			|
-		NET_EVENT_DECT_SCAN_RESULT				|
-		NET_EVENT_DECT_SCAN_DONE				|
-		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
-		NET_EVENT_DECT_CLUSTER_CREATED_RESULT	|
-		NET_EVENT_DECT_ASSOCIATION_CHANGED);
+        NET_EVENT_DECT_NETWORK_STATUS           |
+        NET_EVENT_DECT_SCAN_RESULT              |
+        NET_EVENT_DECT_SCAN_DONE                |
+        NET_EVENT_DECT_NW_BEACON_START_RESULT   |
+        NET_EVENT_DECT_CLUSTER_CREATED_RESULT   |
+        NET_EVENT_DECT_ASSOCIATION_CHANGED      |
+        NET_EVENT_DECT_NEIGHBOR_INFO);          
+		
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	// Get the DECT network interface 

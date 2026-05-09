@@ -8,13 +8,17 @@ LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
 
-/* UART stream framing header (85 bytes total):
+/* UART stream framing header (93 bytes total):
  * [MAGIC:4][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
  * [num_links:1][devices_visited:4*ROUTING_MAX_HOPS][per_link_delay:4*ROUTING_MAX_HOPS]
+ * [per_link_rssi:1*ROUTING_MAX_HOPS]
  */
-#define STREAM_HEADER_SIZE  (4 + 4 + 4 + 4 + 4 + 1 \
-                             + (4 * ROUTING_MAX_HOPS) \
-                             + (4 * ROUTING_MAX_HOPS))
+
+#define STREAM_HEADER_SIZE  (4 + 4 + 4 + 4 + 4 + 1         \
+                             + (4 * ROUTING_MAX_HOPS)      \
+                             + (4 * ROUTING_MAX_HOPS)      \
+                             + (1 * ROUTING_MAX_HOPS))
+
 #define HANDSHAKE_MAGIC_0 0xF4
 #define HANDSHAKE_MAGIC_1 0xAF
 #define HANDSHAKE_REPEAT  100
@@ -203,14 +207,13 @@ bool uart_is_ready(void) { return uart_ready; }
 
 /* ── Streaming API ── */
 
-int uart_stream_begin(size_t total_length, const struct packet_metadata *meta)
+int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
 {
     if (!uart_ready)
         return -ENOTCONN;
     if (stream_active)
         LOG_WRN("Previous stream not finished");
-
-    // Magic + non-array elements of metadata struct
+ 
     uint8_t header[STREAM_HEADER_SIZE] = {
         MAGIC_0,
         MAGIC_1,
@@ -234,33 +237,35 @@ int uart_stream_begin(size_t total_length, const struct packet_metadata *meta)
         (meta->offset_pt_to_ft >> 24) & 0xFF,
         meta->route_delays.num_links,
     };
-
-    int header_idx = 21; // Count number of elements in above array
-
-    // devices_visited array of hop_delays in metadata
+ 
+    int header_idx = 21;
+ 
     for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
         for (int j = 0; j < sizeof(meta->route_delays.devices_visited[0]); j++) {
             header[header_idx++] = (meta->route_delays.devices_visited[i] >> (j * 8)) & 0xFF;
         }
     }
-
-    // per_link_delay array of hop delays in metadata
+ 
     for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
         for (int j = 0; j < sizeof(meta->route_delays.per_link_delay[0]); j++) {
             header[header_idx++] = (meta->route_delays.per_link_delay[i] >> (j * 8)) & 0xFF;
         }
     }
-
+ 
+    /* NEW: per_link_rssi — one signed byte per hop */
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+        header[header_idx++] = (uint8_t)meta->route_delays.per_link_rssi[i];
+    }
+ 
     uart_out_bytes(header, sizeof(header));
-
-    /* CRC seeded over metadata bytes (header[4] and out) */
+ 
     stream_crc = crc16_update(0xFFFF, &header[4], sizeof(header) - 4);
     stream_active = true;
-
-    LOG_INF("UART stream start: %u bytes",
-            total_length);
+ 
+    LOG_INF("UART stream start: %u bytes", total_length);
     return 0;
 }
+
 
 int uart_stream_chunk(const uint8_t *data, uint16_t len)
 {
@@ -511,56 +516,62 @@ static void process_byte(uint8_t b)
             uint16_t received_crc = rx_crc_bytes[0] | (rx_crc_bytes[1] << 8);
             if (received_crc == rx_running_crc) {
                 LOG_INF("RX frame OK (CRC=0x%04X)", received_crc);
-                
-                int parse_idx = 4; // Index after magic bytes
+ 
+                int parse_idx = 4; /* index after total_length in rx_header */
                 uint8_t b0, b1, b2, b3;
-
-                // seq_num
-                b0 = rx_header[parse_idx++]; 
-                b1 = rx_header[parse_idx++]; 
-                b2 = rx_header[parse_idx++]; 
+ 
+                /* seq_num */
+                b0 = rx_header[parse_idx++];
+                b1 = rx_header[parse_idx++];
+                b2 = rx_header[parse_idx++];
                 b3 = rx_header[parse_idx++];
                 rx_frame_work.meta.seq_num = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-
-                // timestamp_ftpt_child
-                b0 = rx_header[parse_idx++]; 
-                b1 = rx_header[parse_idx++]; 
-                b2 = rx_header[parse_idx++]; 
+ 
+                /* timestamp_pt */
+                b0 = rx_header[parse_idx++];
+                b1 = rx_header[parse_idx++];
+                b2 = rx_header[parse_idx++];
                 b3 = rx_header[parse_idx++];
-                rx_frame_work.meta.timestamp_pt = 
+                rx_frame_work.meta.timestamp_pt =
                     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-
-                // offset_pt_to_ftpt
-                b0 = rx_header[parse_idx++]; 
-                b1 = rx_header[parse_idx++]; 
-                b2 = rx_header[parse_idx++]; 
+ 
+                /* offset_pt_to_ft */
+                b0 = rx_header[parse_idx++];
+                b1 = rx_header[parse_idx++];
+                b2 = rx_header[parse_idx++];
                 b3 = rx_header[parse_idx++];
-                rx_frame_work.meta.offset_pt_to_ft = 
+                rx_frame_work.meta.offset_pt_to_ft =
                     b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
-
-                // route_delays.num_devices
+ 
+                /* route_delays.num_links */
                 rx_frame_work.meta.route_delays.num_links = rx_header[parse_idx++];
-
-                // route_delays.devices_visited
+ 
+                /* route_delays.devices_visited */
                 for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
                     b0 = rx_header[parse_idx++];
-                    b1 = rx_header[parse_idx++]; 
-                    b2 = rx_header[parse_idx++]; 
+                    b1 = rx_header[parse_idx++];
+                    b2 = rx_header[parse_idx++];
                     b3 = rx_header[parse_idx++];
-                    rx_frame_work.meta.route_delays.devices_visited[i] = 
+                    rx_frame_work.meta.route_delays.devices_visited[i] =
                         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
                 }
-
-                // route_delays.per_link_delay
+ 
+                /* route_delays.per_link_delay */
                 for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
                     b0 = rx_header[parse_idx++];
-                    b1 = rx_header[parse_idx++]; 
-                    b2 = rx_header[parse_idx++]; 
+                    b1 = rx_header[parse_idx++];
+                    b2 = rx_header[parse_idx++];
                     b3 = rx_header[parse_idx++];
-                    rx_frame_work.meta.route_delays.per_link_delay[i] = 
+                    rx_frame_work.meta.route_delays.per_link_delay[i] =
                         b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
                 }
-
+ 
+                /* route_delays.per_link_rssi */
+                for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+                    rx_frame_work.meta.route_delays.per_link_rssi[i] =
+                        (int8_t)rx_header[parse_idx++];
+                }
+ 
                 rx_frame_work.payload_len = rx_payload_len;
                 memcpy(rx_frame_work.payload, rx_payload_buf, rx_payload_len);
                 k_work_submit(&rx_frame_work.work);

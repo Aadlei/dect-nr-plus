@@ -9,9 +9,10 @@
 #define CHUNK_POOL_COUNT    16
 
 struct hop_delays {
-    uint8_t num_links;
+    uint8_t  num_links;
     uint32_t devices_visited[ROUTING_MAX_HOPS];
     uint32_t per_link_delay[ROUTING_MAX_HOPS];
+    int8_t   per_link_rssi[ROUTING_MAX_HOPS];   // new
 };
 
 struct data_packet {
