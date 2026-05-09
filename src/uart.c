@@ -5,15 +5,16 @@
 
 LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 
-// STREAM HEADER:
-// MAGIC_0, MAGIC_1, MAGIC_0, MAGIC_1: 4 bytes
-// total packet size: 4 bytes
-// struct packet_metadata: 4 + 4 + 4 + DELAY_HEADER_SIZE(65) bytes
-#define STREAM_HEADER_SIZE (4 + 4 + (4 + 4 + 4 + DELAY_HEADER_SIZE))
-
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
 
+/* UART stream framing header (85 bytes total):
+ * [MAGIC:4][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
+ * [num_links:1][devices_visited:4*ROUTING_MAX_HOPS][per_link_delay:4*ROUTING_MAX_HOPS]
+ */
+#define STREAM_HEADER_SIZE  (4 + 4 + 4 + 4 + 4 + 1 \
+                             + (4 * ROUTING_MAX_HOPS) \
+                             + (4 * ROUTING_MAX_HOPS))
 #define HANDSHAKE_MAGIC_0 0xF4
 #define HANDSHAKE_MAGIC_1 0xAF
 #define HANDSHAKE_REPEAT  100
@@ -421,7 +422,7 @@ static uint8_t    rx_crc_bytes[2];
 static uint8_t    rx_crc_idx;
 static uint16_t   rx_running_crc;
 
-BUILD_ASSERT(sizeof(rx_header) >= (4 + 4 + 4 + (DELAY_HEADER_SIZE))); // Change this based on STREAM_HEADER_SIZE
+BUILD_ASSERT(sizeof(rx_header) == STREAM_HEADER_SIZE - 4); // Change this based on STREAM_HEADER_SIZE
 
 /* Work item for deferred callback (ISR -> thread context) */
 struct rx_frame_work_t {

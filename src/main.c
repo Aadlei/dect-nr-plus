@@ -36,6 +36,7 @@
 
 #include "spi.h"
 #include "uart.h"
+#include "sync.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
@@ -52,23 +53,12 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #define DECT_PT_LONG_RD_ID				0x11223344U // PT relay (change this for each PT)
 #define DECT_SINK_LONG_RD_ID 			0x67214200U // FT sink
 
-#define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
-#define SYNC_T_SIZE						4
-#define SYNC_PROCESS_DELAY_MSEC			2000			
-#define SYNC_PORT						12346
 #define COMMON_PORT 					12345
 #define MESH_PREFIX_STR 				"fd12:3456:789a"
 #define NW_SCAN_RETRY_MS 				2000
-#define SOCKET_SYNC_RX_TIMEOUT_SEC		10
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define SYNC_TIMEOUT					5000
 #define WORK_RESCHEDULE_TIME_SEC 		10
 
-struct SYNC_data
-{
-	uint32_t magic_signature;
-	uint32_t T[SYNC_T_SIZE];
-};
 
 static struct in6_addr mesh_prefix;
 
@@ -77,7 +67,6 @@ static struct net_if *dect_iface;
 
 // Sockets
 static int common_socket = -1;
-static int SYNC_socket = -1;
 
 // Application state
 static bool nw_beacon_started = false; // TODO: Fix this to more robust solution
@@ -87,7 +76,6 @@ static bool dect_connected;
 uint32_t message_counter;
 uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
-static uint32_t SYNC_network_delay_parent;
 static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static int32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
@@ -116,16 +104,11 @@ static void main_mac_print_network_info(struct net_if *iface);
 // Sockets
 static int open_common_socket(void);
 static void close_common_socket(void);
-static int open_SYNC_socket(void);
-static void close_SYNC_socket(void);
 
-// SYNC
-static int SYNC_pt_operation(void);
-static int SYNC_ft_operation(void);
 
 // TX and RX threads
 static void rx_thread(void);
-static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id);
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id);
 
 // Helper functions
 static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
@@ -171,7 +154,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	}
 
 	const uint8_t *image_data = spi_slave_get_image_buffer();
-	size_t image_size = spi_slave_get_image_size();
+	uint32_t image_size = (uint32_t)spi_slave_get_image_size();
 	
 	LOG_INF("New image received: %zu bytes", image_size);
 
@@ -305,303 +288,12 @@ static void close_common_socket(void)
 	LOG_INF("Succesfully closed commonTX and RX sockets");
 }
 
-static int open_SYNC_socket(void)
-{
-	SYNC_socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (SYNC_socket < 0)
-	{
-		LOG_ERR("Failed to create SYNC socket: %d", errno);
-		SYNC_socket = -1;
-		return -errno;
-	}
-
-	// Socket options
-	struct timeval timeout =
-	{
-		.tv_sec = SOCKET_SYNC_RX_TIMEOUT_SEC,
-		.tv_usec = 0
-	};
-	int dect_iface_idx = net_if_get_by_iface(dect_iface);
-	int reuse = 1;
-
-	setsockopt(SYNC_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); // Set timeout
-	setsockopt(SYNC_socket, SOL_SOCKET, SO_BINDTODEVICE, &dect_iface_idx, sizeof(dect_iface_idx)); // Bind to DECT interface
-	setsockopt(SYNC_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));	// Reuse same socket if connection is restarted
-
-	struct sockaddr_in6 SYNC_rx_addr = {
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SYNC_PORT),
-		.sin6_addr = in6addr_any
-	};
-
-	int ret = bind(SYNC_socket, (struct sockaddr *)&SYNC_rx_addr, sizeof(SYNC_rx_addr));
-	if (ret < 0)
-	{
-		LOG_ERR("Failed to bind SYNC socket: %d", errno);
-		close(SYNC_socket);
-		SYNC_socket = -1;
-		return -errno;
-	}
-
-	LOG_INF("Successfully opened SYNC socket");
-
-	return 0;
-}
-
-static void close_SYNC_socket(void)
-{
-	if (SYNC_socket >= 0)
-	{
-		close(SYNC_socket);
-		SYNC_socket = -1;
-	}
-
-	LOG_INF("Succesfully closed SYNC TX and RX sockets");
-}
-
 static void main_mac_print_network_info(struct net_if *iface)
 {
 	LOG_INF("=== Network Interface Information ===");
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
-static int SYNC_pt_operation(void)
-{
-	int ret;
-
-	struct SYNC_data SYNC_timestamps = {0};
-
-	uint32_t parent_long_rd_id = get_parent_long_rd_id();
-	if (parent_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid long RD ID for parent");
-		return -1;
-	}
-
-	struct sockaddr_in6 dst_addr =
-	{
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SYNC_PORT)
-	};
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, parent_long_rd_id);
-	if(!ok)
-	{
-		LOG_WRN("Failed to create IPv6 address");
-		return -1;
-	}
-
-	// TX
-	if (SYNC_socket < 0)
-	{
-		LOG_WRN("SYNC socket not open");
-		return -1;
-	}
-
-	SYNC_timestamps.magic_signature = SYNC_MAGIC_SIGNATURE;
-	SYNC_timestamps.T[0] = k_uptime_get_32();
-	ret = sendto(SYNC_socket, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
-				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-	if (ret < 0)
-	{
-		LOG_WRN("Failed to send SYNC packet: %d", errno);
-		return -1;
-	}
-	else LOG_INF("SYNC packet sent");
-
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len = sizeof(src_addr);
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	int max_recv_retries = 5;
-	int current_retries = 0;
-
-	while (1)
-	{
-		if (++current_retries > max_recv_retries)
-		{
-			LOG_WRN("Ran out of RX retries. Exiting RX...");
-			return -1;
-		}
-
-		struct SYNC_data rx_from_parent;
-
-		LOG_INF("Starting SYNC RX...");
-		ret = recvfrom(SYNC_socket, &rx_from_parent, sizeof(rx_from_parent), 0,
-				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp = k_uptime_get_32();
-
-		if (ret < 0) // Handle whatever errors
-		{
-			if (errno == EAGAIN) // Socket timeout
-			{
-				LOG_WRN("SYNC socket timeout (errno=%d). Retrying RX...", errno);
-				continue;
-			}
-
-			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
-			continue;
-		}
-
-		// Check if packet is correct
-		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
-		{
-			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
-			continue;
-		}
-
-		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-		LOG_INF("Received SYNC packet, %d bytes from IPv6=%s (long_rd_id=0x%08x)", ret, addr_str, rx_long_rd_id);
-
-		if (rx_long_rd_id == parent_long_rd_id)
-		{
-			LOG_INF("RX packet long RD ID matching. Exiting RX...");
-
-			SYNC_timestamps.T[1] = rx_from_parent.T[1];
-			SYNC_timestamps.T[2] = rx_from_parent.T[2];
-			SYNC_timestamps.T[3] = T_temp;
-			break;
-		}
-		else
-		{
-			LOG_WRN("Long RD ID not matching. Got 0x%08x, but expected 0x%08x. Retrying RX...", rx_long_rd_id, parent_long_rd_id);
-			continue;
-		}
-	}
-
-	// Calculate total offset
-	int32_t signed_T[SYNC_T_SIZE];
-	for (int i = 0; i < SYNC_T_SIZE; i++)
-	{
-		signed_T[i] = (int32_t)SYNC_timestamps.T[i];
-	}
-
-	// Traditional NTP (assumes symmetric network delay)
-	// SYNC_offset_parent = ((signed_T[1] - signed_T[0]) + (signed_T[2] - signed_T[3])) / 2;
-	// SYNC_network_delay_parent = (signed_T[3] - signed_T[0]) - (signed_T[2] - signed_T[1]);
-
-	// "Cheat" clock synchronization (by assuming PT->FT delay = 0)
-	SYNC_offset_parent = signed_T[1] - signed_T[0];
-	SYNC_network_delay_parent = 0; // This is obviously wrong
-
-	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
-
-	return 0;
-}
-
-static int SYNC_ft_operation(void)
-{
-	int ret;
-
-	struct SYNC_data SYNC_timestamps = {0};
-
-	uint32_t child_long_rd_id = get_first_child_long_rd_id();
-	if (child_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid long RD ID for child");
-		return -1;
-	}
-
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len = sizeof(src_addr);
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	// RX
-	if (SYNC_socket < 0)
-	{
-		LOG_WRN("SYNC socket not open");
-		return -1;
-	}
-
-	int max_recv_retries = 5;
-	int current_retries = 0;
-
-	while (1)
-	{
-		if (++current_retries > max_recv_retries)
-		{
-			LOG_WRN("Ran out of RX retries. Exiting RX...");
-			return -1;
-		}
-
-		struct SYNC_data rx_from_child;
-
-		LOG_INF("Starting SYNC RX...");
-		// Timestamp and RX
-		ret = recvfrom(SYNC_socket, &rx_from_child, sizeof(rx_from_child), 0,
-				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp = k_uptime_get_32();
-
-		if (ret < 0) // Handle whatever socket errors 
-		{
-			if (errno == EAGAIN) // Socket timeout
-			{
-				LOG_WRN("SYNC socket timeout (errno=%d). Retrying RX...", errno);
-				continue;
-			}
-
-			LOG_WRN("RX packet failed: %d. Retrying RX...", errno);
-			continue;
-		}
-
-		// Check if packet is correct
-		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
-		{
-			LOG_WRN("Packet signature not matching for SYNC packet. Retrying RX...");
-			continue;
-		}
-
-		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-		LOG_INF("Received SYNC packet, %d bytes from IPv6=%s (long_rd_id=0x%08x)", ret, addr_str, rx_long_rd_id);
-
-		if (rx_long_rd_id == child_long_rd_id)
-		{
-			LOG_INF("RX packet long RD ID matching. Exiting RX...");
-
-			SYNC_timestamps.T[0] = rx_from_child.T[0];
-			SYNC_timestamps.T[1] = T_temp;
-			break;
-		}
-		else
-		{
-			LOG_WRN("Long RD ID not matching. Got 0x%08x, but got 0x%08x. Retrying RX...", rx_long_rd_id, child_long_rd_id);
-			continue;
-		}
-	}
-
-	struct sockaddr_in6 dst_addr =
-	{
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SYNC_PORT)
-	};
-
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
-	if(!ok)
-	{
-		LOG_ERR("Failed to create IPv6 address");
-		return -1;
-	}
-
-	struct SYNC_data SYNC_tx_packet = SYNC_timestamps;
-
-	SYNC_tx_packet.magic_signature = SYNC_MAGIC_SIGNATURE;
-	SYNC_tx_packet.T[2] = k_uptime_get_32();
-	ret = sendto(SYNC_socket, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
-				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-	if (ret < 0)
-	{
-		LOG_WRN("Failed to send SYNC packet: %d", errno);
-		return -1;
-	}
-	else LOG_INF("SYNC packet sent");
-
-	return 0;
-}
 
 static void rx_thread(void)
 {
@@ -687,7 +379,7 @@ static void rx_thread(void)
 	free(pkt_recv); // Never reached because of infinite loop, but just in case
 }
 
-static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
 {
 	int ret = -1;
 
@@ -754,6 +446,7 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, struct hop
 		
 		// Free the packet memory
 		free(packet);
+		k_msleep(50);
 	}
 	
 	LOG_INF("Sent packet to destination");
@@ -1068,14 +761,16 @@ static void run_as_ft(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
+	uint32_t child_long_rd_id = get_first_child_long_rd_id();
+
 	// Start SYNC rx
-	int success = SYNC_ft_operation();
+	int success = sync_ft_operation(child_long_rd_id);
 	while (success < 0)
 	{
 		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
-		success = SYNC_ft_operation();
+		success = sync_ft_operation(child_long_rd_id);
 	}
-	close_SYNC_socket(); // Close SYNC sockets when done to spare resources
+	sync_close_socket(); // Close SYNC sockets when done to spare resources
 
 	k_sleep(K_SECONDS(20));	// TODO: Temp, remove this
 
@@ -1103,14 +798,16 @@ static void run_as_pt(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
+	uint32_t parent_long_rd_id = get_parent_long_rd_id();
+
 	// Start SYNC TX
-	int success = SYNC_pt_operation();
+	int success = sync_pt_operation(parent_long_rd_id, &SYNC_offset_parent);
 	while (success < 0)
 	{
-		success = SYNC_pt_operation();
+		success = sync_pt_operation(parent_long_rd_id, &SYNC_offset_parent);
 		k_sleep(K_SECONDS(10)); // Do SYNC operation and sleep retry
 	}
-	close_SYNC_socket(); // Close SYNC sockets to save resources
+	sync_close_socket(); // Close SYNC sockets to save resources
 
 	k_sleep(K_SECONDS(20)); // TODO: Temp, remove this
 
@@ -1170,7 +867,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Open sockets
 		open_common_socket();
-		open_SYNC_socket();
+		sync_open_socket();
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn on LED 1 to indicate connection 
@@ -1190,7 +887,7 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Close sockets
 		close_common_socket();
-		close_SYNC_socket();
+		sync_close_socket();
 
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 		k_work_cancel_delayable(&tx_work);
@@ -1453,6 +1150,8 @@ int main(void)
 	// Write settings
 	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
 	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
+
+	sync_init(dect_iface, &mesh_prefix, DECT_SINK_LONG_RD_ID);
 
 	// Initialize modem library and this triggers DECT NR+ stack initialization
 #if defined(CONFIG_NRF_MODEM_LIB)

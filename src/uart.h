@@ -4,46 +4,42 @@
 #include <zephyr/kernel.h>
 #include <stdint.h>
 
-#define ROUTING_MAX_HOPS	8
-#define DELAY_HEADER_SIZE   1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS)
-#define PACKET_HEADER_SIZE  2 + 2 + 4 + 4 + 4 + DELAY_HEADER_SIZE + 2
+#define ROUTING_MAX_HOPS    8
 #define MAX_PAYLOAD_SIZE    1024
-#define CHUNK_BUF_SIZE      (PACKET_HEADER_SIZE + MAX_PAYLOAD_SIZE) // data_packet header + payload 
 #define CHUNK_POOL_COUNT    16
 
+struct hop_delays {
+    uint8_t num_links;
+    uint32_t devices_visited[ROUTING_MAX_HOPS];
+    uint32_t per_link_delay[ROUTING_MAX_HOPS];
+};
+
+struct data_packet {
+    uint16_t packet_idx;
+    uint16_t total_packets;
+    uint32_t total_data_size;
+    uint32_t timestamp_pt;
+    int32_t  offset_pt_to_ft;
+    struct hop_delays route_delays;
+    uint16_t payload_len;
+    uint8_t  payload[];
+} __attribute__((packed));
+
+/* Single source of truth — can never drift from the actual struct layout */
+#define CHUNK_BUF_SIZE  (sizeof(struct data_packet) + MAX_PAYLOAD_SIZE)
+
 struct rx_chunk {
-    void *fifo_reserved;
+    void    *fifo_reserved;
     uint16_t data_len;
     uint8_t  data[CHUNK_BUF_SIZE];
 };
 
-// NOTE: Consider removing this, its troublesome with arrays over UART
-struct hop_delays {
-    uint8_t num_links; // Keeps track of array indexing
-    uint32_t devices_visited[ROUTING_MAX_HOPS]; // Device visited along path
-    uint32_t per_link_delay[ROUTING_MAX_HOPS]; // Time delays for each link
-};
-
-// TODO: Rename UART handshake to something else
-// TODO: Include delay and hop information from regular packet included here
 struct packet_metadata {
     uint32_t seq_num;
-    uint32_t timestamp_pt; // Same as timestamp_pt in data_packet
-    int32_t offset_pt_to_ft; // Same as offset_pt_to_ft in data_packet
+    uint32_t timestamp_pt;
+    int32_t  offset_pt_to_ft;
     struct hop_delays route_delays;
 };
-
-// TODO: Structure this better so we can distinguish what is only necessary for PT->FT, and what needs to be present through the whole path
-struct data_packet {
-    uint16_t packet_idx;
-    uint16_t total_packets;
-    size_t total_data_size; // Potential problem, since size_t size is platform dependent
-    uint32_t timestamp_pt; // NOTE: Timestamp for the start of TX of first chunk
-    int32_t offset_pt_to_ft; // Offset between PT and FT (DECT)
-    struct hop_delays route_delays;
-    uint16_t payload_len;
-    uint8_t payload[];
-} __attribute__((packed));
 
 int uart_data_init(void);
 int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta);
@@ -56,7 +52,8 @@ struct rx_chunk *uart_get_free_chunk(void);
 void uart_return_free_chunk(struct rx_chunk *chunk);
 void uart_queue_chunk(struct rx_chunk *chunk);
 bool uart_is_ready(void);
-typedef void (*uart_rx_frame_cb_t)(const uint8_t *data, uint32_t len, 
+
+typedef void (*uart_rx_frame_cb_t)(const uint8_t *data, uint32_t len,
                                     const struct packet_metadata *meta);
 void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb);
 

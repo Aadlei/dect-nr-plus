@@ -16,7 +16,7 @@ static const struct device *gpio_dev;
 #define CHUNK_SIZE 4096
 #define MAX_IMAGE_SIZE 16384
 
-K_THREAD_STACK_DEFINE(spi_slave_stack, 6144);
+K_THREAD_STACK_DEFINE(spi_slave_stack, 12288);
 static struct k_thread spi_slave_thread_data;
 static k_tid_t spi_slave_thread_id;
 
@@ -111,6 +111,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     const struct device *spi_dev;
     int ret;
     size_t eoi_pos;
+    uint8_t prev_last_byte = 0;
 
     ARG_UNUSED(p1);
     ARG_UNUSED(p2);
@@ -127,10 +128,13 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     }
 
     LOG_INF("SPI slave ready, waiting for master...");
-    gpio_pin_set(gpio_dev, READY_PIN, 1); 
+    gpio_pin_set(gpio_dev, READY_PIN, 1);
+
     while (1)
     {
         memset(rx_buffer, 0, CHUNK_SIZE);
+        rx_buf.len = CHUNK_SIZE;
+        tx_buf.len = TX_BUFFER_SIZE;
 
         ret = spi_transceive(spi_dev, &spi_cfg, &tx_buf_set, &rx_buf_set);
 
@@ -141,83 +145,84 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
             continue;
         }
 
-        if (ret > 0)
+        /* spi_transceive returns 0 on success (standard Zephyr SPIS).
+         * rx_buf.len is updated by the driver to reflect actual bytes received. */
+        size_t bytes_received = rx_buf.len;
+        if (bytes_received == 0)
+            continue;
+
+        /* Detect start of new image */
+        if (rx_buffer[0] == 0xFF && rx_buffer[1] == 0xD8)
         {
-            // Check for JPEG header (start of new image)
-            if (rx_buffer[0] == 0xFF && rx_buffer[1] == 0xD8)
+            /* Wait until the previous image has been consumed by the work handler */
+            bool still_pending = true;
+            while (still_pending)
             {
-                // Wait until previous image has been consumed
-                bool still_pending = true;
-                while (still_pending)
-                {
-                    k_mutex_lock(&image_mutex, K_FOREVER);
-                    still_pending = new_image_available;
-                    k_mutex_unlock(&image_mutex);
-                    if (still_pending)
-                    {
-                        k_sleep(K_MSEC(10));
-                    }
-                }
-
-                // LOG_INF("=== New image started ===");
-                total_received = 0;
-                receiving_image = true;
-                memset(image_buffer, 0, MAX_IMAGE_SIZE);
+                k_mutex_lock(&image_mutex, K_FOREVER);
+                still_pending = new_image_available;
+                k_mutex_unlock(&image_mutex);
+                if (still_pending)
+                    k_sleep(K_MSEC(10));
             }
 
-            if (receiving_image)
-            {
-                // Accumulate chunk into image buffer
-                if (total_received + ret <= MAX_IMAGE_SIZE)
-                {
-                    memcpy(image_buffer + total_received, rx_buffer, ret);
-                    total_received += ret;
-                    LOG_INF("Chunk %d bytes (total: %zu/%d)",
-                            ret, total_received, MAX_IMAGE_SIZE);
+            total_received = 0;
+            receiving_image = true;
+            prev_last_byte = 0;
+            memset(image_buffer, 0, MAX_IMAGE_SIZE);
+            LOG_INF("New image started");
+        }
 
-                    // Check if this chunk contains JPEG EOI marker
-                    if (find_jpeg_end(rx_buffer, ret, &eoi_pos))
-                    {
-                        size_t actual_size = (total_received - ret) + eoi_pos;
-                        receiving_image = false;
-                        
-                        // Signal NOT ready immediately
-                        gpio_pin_set(gpio_dev, READY_PIN, 0);
-                        
-                        k_mutex_lock(&image_mutex, K_FOREVER);
-                        image_size = actual_size;
-                        new_image_available = true;
-                        k_mutex_unlock(&image_mutex);
-                        
-                        LOG_INF("=== Image complete! ===");
-                        LOG_INF("Total size: %zu bytes", actual_size);
+        if (!receiving_image)
+            continue;
 
-                        // Print entire image as hex dump (first 128 bytes)
-                        LOG_INF("First 128 bytes:");
-                        LOG_HEXDUMP_INF(image_buffer,
-                                        (actual_size > 128) ? 128 : actual_size,
-                                        "Image data:");
+        if (total_received + bytes_received > MAX_IMAGE_SIZE)
+        {
+            LOG_ERR("Image too large, discarding (total=%zu)", total_received);
+            receiving_image = false;
+            total_received = 0;
+            prev_last_byte = 0;
+            continue;
+        }
 
-                        // Print last 32 bytes (should contain FF D9)
-                        if (actual_size > 32)
-                        {
-                            LOG_INF("Last 32 bytes:");
-                            LOG_HEXDUMP_INF(image_buffer + actual_size - 32, 32,
-                                            "Image end:");
-                        }
-                    }
-                }
-                else
-                {
-                    LOG_ERR("Image too large! Discarding.");
-                    receiving_image = false;
-                    total_received = 0;
-                }
-            }
+        memcpy(image_buffer + total_received, rx_buffer, bytes_received);
+        total_received += bytes_received;
+
+        /* Check for EOI — including the case where 0xFF ended the previous
+         * chunk and 0xD9 starts this one */
+        bool eoi_found = false;
+
+        if (prev_last_byte == 0xFF && rx_buffer[0] == 0xD9)
+        {
+            eoi_pos = 1;
+            eoi_found = true;
+            LOG_INF("EOI detected across chunk boundary");
+        }
+        else if (find_jpeg_end(rx_buffer, bytes_received, &eoi_pos))
+        {
+            eoi_found = true;
+        }
+
+        if (eoi_found)
+        {
+            size_t actual_size = (total_received - bytes_received) + eoi_pos;
+            receiving_image = false;
+            prev_last_byte = 0;
+
+            gpio_pin_set(gpio_dev, READY_PIN, 0);
+
+            k_mutex_lock(&image_mutex, K_FOREVER);
+            image_size = actual_size;
+            new_image_available = true;
+            k_mutex_unlock(&image_mutex);
+
+            LOG_INF("Image complete: %zu bytes", actual_size);
+        }
+        else
+        {
+            prev_last_byte = rx_buffer[bytes_received - 1];
         }
     }
 }
-
 // Potential risk/problem: Caller can read from image_buffer whilst it is being written
 // Explicitly handled: Master will not send new data before slave has transmitted and lowered the pin for flow control
 // Fix 1: Mutex for entire TX operation

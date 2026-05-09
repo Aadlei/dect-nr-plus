@@ -179,7 +179,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="Receive images from nRF9151 DK and publish via MQTT")
     # parser.add_argument("--port", default="/dev/ttyUSB0",
-    parser.add_argument("--port", default="COM3",
+    parser.add_argument("--port", default="/dev/ttyUSB0",
                         help="Serial port (default: /dev/ttyUSB0)")
     parser.add_argument("--baud", type=int, default=1000000,
                         help="Baud rate (default: 1000000)")

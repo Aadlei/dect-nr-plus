@@ -12,6 +12,7 @@ project(hello_dect)
 target_sources(app PRIVATE
     src/main.c
     src/uart.c
+    src/sync.c
 )
 
 if(NOT CONFIG_DECT_RELAY_PT AND NOT CONFIG_DECT_RELAY_FT)
