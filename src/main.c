@@ -45,7 +45,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define DECT_EDGE_PT_LONG_RD_ID  		0xAABBCCDDU // PT edge
@@ -410,6 +410,12 @@ static void rx_thread(void)
         uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
         int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
         uint32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
+
+		LOG_INF("current_delay: %u", current_delay);
+		LOG_INF("ft_this_timestamp: %u", ft_this_timestamp);
+		LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+		LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
+		LOG_INF("cumulative_delay: %u", cumulative_delay);
 
         int8_t rx_rssi = get_rx_rssi(&src_addr);
 
@@ -780,6 +786,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
 	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
 	LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
+	LOG_INF("cumulative_delay: %u", cumulative_delay);
 
 	// Update values in struct
 	struct hop_delays delay_information = {
@@ -831,8 +838,6 @@ static void run_as_ft(void)
 	}
 	sync_close_socket(); // Close SYNC sockets when done to spare resources
 
-	k_sleep(K_SECONDS(20));	// TODO: Temp, remove this
-
 	ret = uart_data_init();
 	if (ret)
 	{
@@ -868,10 +873,8 @@ static void run_as_pt(void)
 	}
 	sync_close_socket(); // Close SYNC sockets to save resources
 
-	k_sleep(K_SECONDS(20)); // TODO: Temp, remove this
-
 	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-    uart_rx_set_frame_callback(main_relay_tx); // TODO: Change this function callback name
+    uart_rx_set_frame_callback(main_relay_tx);
     int ret = uart_data_init();
     if (ret) {
         LOG_ERR("Failed to initialize UART RX: %d", ret);
@@ -1057,11 +1060,11 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		/* if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
 			break;
-		} */
+		}
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
@@ -1252,8 +1255,7 @@ int main(void)
 	#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
     	uart_handshake_init();
     	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
-			uint32_t T0 = k_uptime_get_32();
-			uart_handshake_send_id_timestamp(current_long_rd_id, T0);
+			uart_handshake_send_id_timestamp(current_long_rd_id);
     	#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
         	if (uart_handshake_receive_id_timestamp(&sibling_ft_long_rd_id, &sibling_ft_offset, 30)) {
             	LOG_ERR("No sibling FT ID received, scanning without filter");

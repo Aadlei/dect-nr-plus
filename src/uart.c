@@ -7,14 +7,17 @@ LOG_MODULE_REGISTER(uart_data, LOG_LEVEL_INF);
 
 #define MAGIC_0 0xAA
 #define MAGIC_1 0x55
+#define MAGIC_2 0xBB
+#define MAGIC_3 0x44
 
-/* UART stream framing header (93 bytes total):
- * [MAGIC:4][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
- * [num_links:1][devices_visited:4*ROUTING_MAX_HOPS][per_link_delay:4*ROUTING_MAX_HOPS]
+/* UART stream framing header (97 bytes total):
+ * [MAGIC:8][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4][num_links:1]
+ * [devices_visited:4*ROUTING_MAX_HOPS]
+ * [per_link_delay:4*ROUTING_MAX_HOPS]
  * [per_link_rssi:1*ROUTING_MAX_HOPS]
  */
 
-#define STREAM_HEADER_SIZE  (4 + 4 + 4 + 4 + 4 + 1         \
+#define STREAM_HEADER_SIZE  (8 + 4 + 4 + 4 + 4 + 1         \
                              + (4 * ROUTING_MAX_HOPS)      \
                              + (4 * ROUTING_MAX_HOPS)      \
                              + (1 * ROUTING_MAX_HOPS))
@@ -66,24 +69,23 @@ int uart_handshake_init(void)
     return 0;
 }
 
-int uart_handshake_send_id_timestamp(uint32_t long_rd_id, uint32_t timestamp) // TODO: Take timestamp here instead
+int uart_handshake_send_id_timestamp(uint32_t long_rd_id)
 {
-    uint8_t *id = (uint8_t *)&long_rd_id;
-    uint8_t *ts = (uint8_t *)&timestamp;
+    uint8_t *id_ptr = (uint8_t *)&long_rd_id;
 
     for (int r = 0; r < HANDSHAKE_REPEAT; r++) {
+        uint32_t ts = k_uptime_get_32();
+        uint8_t *ts_ptr = (uint8_t *)&ts;
+
         uart_poll_out(uart_dev, HANDSHAKE_MAGIC_0);
         uart_poll_out(uart_dev, HANDSHAKE_MAGIC_1);
-        for (int i = 0; i < 4; i++) { // For timestamp
-            uart_poll_out(uart_dev, ts[i]);
-        }
-        for (int i = 0; i < 4; i++) { // For long RD ID // TODO: Remove this magic number
-            uart_poll_out(uart_dev, id[i]);
-        }
+        for (int i = 0; i < 4; i++) uart_poll_out(uart_dev, ts_ptr[i]);
+        for (int i = 0; i < 4; i++) uart_poll_out(uart_dev, id_ptr[i]);
+
         k_msleep(HANDSHAKE_INTERVAL_MS);
     }
 
-    LOG_INF("Handshake: sent FT ID 0x%08x (%d times)", long_rd_id, HANDSHAKE_REPEAT); // TODO: Print offset here
+    LOG_INF("Handshake: sent FT ID 0x%08x (%d times)", long_rd_id, HANDSHAKE_REPEAT);
     return 0;
 }
 
@@ -217,8 +219,12 @@ int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
     uint8_t header[STREAM_HEADER_SIZE] = {
         MAGIC_0,
         MAGIC_1,
+        MAGIC_2,
+        MAGIC_3,
         MAGIC_0,
         MAGIC_1,
+        MAGIC_2,
+        MAGIC_3,
         (total_length >> 0) & 0xFF,
         (total_length >> 8) & 0xFF,
         (total_length >> 16) & 0xFF,
@@ -238,7 +244,7 @@ int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
         meta->route_delays.num_links,
     };
  
-    int header_idx = 21;
+    int header_idx = 25; // NOTE: COUNT THE NUMBER OF BYTES IN rx_header
  
     for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
         for (int j = 0; j < sizeof(meta->route_delays.devices_visited[0]); j++) {
@@ -259,7 +265,7 @@ int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
  
     uart_out_bytes(header, sizeof(header));
  
-    stream_crc = crc16_update(0xFFFF, &header[4], sizeof(header) - 4);
+    stream_crc = crc16_update(0xFFFF, &header[8], sizeof(header) - 8);
     stream_active = true;
  
     LOG_INF("UART stream start: %u bytes", total_length);
@@ -411,6 +417,10 @@ typedef enum {
     WAIT_MAGIC_1,
     WAIT_MAGIC_2,
     WAIT_MAGIC_3,
+    WAIT_MAGIC_4,
+    WAIT_MAGIC_5,
+    WAIT_MAGIC_6,
+    WAIT_MAGIC_7,
     READ_HEADER,
     READ_PAYLOAD,
     READ_CRC,
@@ -418,7 +428,7 @@ typedef enum {
 
 static uart_rx_frame_cb_t rx_frame_cb;
 static rx_state_t rx_state = WAIT_MAGIC_0;
-static uint8_t    rx_header[STREAM_HEADER_SIZE - 4];
+static uint8_t    rx_header[STREAM_HEADER_SIZE - 8];
 static uint8_t    rx_header_idx;
 static uint8_t   *rx_payload_buf;
 static uint32_t   rx_payload_len;
@@ -427,7 +437,7 @@ static uint8_t    rx_crc_bytes[2];
 static uint8_t    rx_crc_idx;
 static uint16_t   rx_running_crc;
 
-BUILD_ASSERT(sizeof(rx_header) == STREAM_HEADER_SIZE - 4); // Change this based on STREAM_HEADER_SIZE
+BUILD_ASSERT(sizeof(rx_header) == STREAM_HEADER_SIZE - 8); // Change this based on STREAM_HEADER_SIZE
 
 /* Work item for deferred callback (ISR -> thread context) */
 struct rx_frame_work_t {
@@ -466,10 +476,22 @@ static void process_byte(uint8_t b)
         rx_state = (b == MAGIC_1) ? WAIT_MAGIC_2 : WAIT_MAGIC_0;
         break;
     case WAIT_MAGIC_2:
-        rx_state = (b == MAGIC_0) ? WAIT_MAGIC_3 : WAIT_MAGIC_0;
+        rx_state = (b == MAGIC_2) ? WAIT_MAGIC_3 : WAIT_MAGIC_0;
         break;
     case WAIT_MAGIC_3:
-        if (b == MAGIC_1) {
+        rx_state = (b == MAGIC_3) ? WAIT_MAGIC_4 : WAIT_MAGIC_0;
+        break;
+    case WAIT_MAGIC_4:
+        rx_state = (b == MAGIC_0) ? WAIT_MAGIC_5 : WAIT_MAGIC_0;
+        break;
+    case WAIT_MAGIC_5:
+        rx_state = (b == MAGIC_1) ? WAIT_MAGIC_6 : WAIT_MAGIC_0;
+        break;
+    case WAIT_MAGIC_6:
+        rx_state = (b == MAGIC_2) ? WAIT_MAGIC_7 : WAIT_MAGIC_0;
+        break;
+    case WAIT_MAGIC_7:
+        if (b == MAGIC_3) {
             rx_header_idx = 0;
             rx_state = READ_HEADER;
         } else {
@@ -525,7 +547,8 @@ static void process_byte(uint8_t b)
                 b1 = rx_header[parse_idx++];
                 b2 = rx_header[parse_idx++];
                 b3 = rx_header[parse_idx++];
-                rx_frame_work.meta.seq_num = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
+                rx_frame_work.meta.seq_num = 
+                    b0 | (b1 << 8) | (b2 << 16) | (b3 << 24);
  
                 /* timestamp_pt */
                 b0 = rx_header[parse_idx++];
@@ -668,5 +691,3 @@ void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb)
 }
 
 #endif /* CONFIG_DECT_RELAY_PT */
-
-// TODO: Consider redesigning to buffer of DECT packets and adding timeout
