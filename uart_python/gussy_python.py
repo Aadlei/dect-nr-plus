@@ -25,7 +25,7 @@ import matplotlib.patches as mpatches
 from PIL import Image
 
 ROUTING_MAX_HOPS = 8
-MAGIC = b'\xAA\x55\xAA\x55'
+MAGIC = b'\xAA\x55\xBB\x44'
 HEADER_SIZE = 4 + 4 + 4 + 4 + 4 + 1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS)  # 85 bytes
 
 # ── CRC ──────────────────────────────────────────────────────────────────────

@@ -15,7 +15,7 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 
 ROUTING_MAX_HOPS = 8
-MAGIC = b'\xAA\x55\xAA\x55'
+MAGIC = b'\xAA\x55\xBB\x44'
 
 # Header size: 4 magic + 4 length + 4 seq + 4 timestamp + 4 offset + 1 num_links
 #              + 4*8 devices_visited + 4*8 per_link_delay + 1*8 per_link_rssi = 93 bytes
