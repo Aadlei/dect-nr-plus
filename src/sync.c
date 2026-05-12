@@ -135,22 +135,21 @@ int sync_pt_operation(uint32_t parent_long_rd_id, int32_t *offset_out)
         return -EINVAL;
     }
 
-    /* --- Send T0 --- */
-    struct sync_data pkt = {
-        .magic_signature = SYNC_MAGIC_SIGNATURE,
-    };
-    pkt.T[0] = k_uptime_get_32();
-
-    int ret = sendto(sync_socket, &pkt, sizeof(pkt), 0,
-                     (struct sockaddr *)&dst_addr, sizeof(dst_addr));
-    if (ret < 0) {
-        LOG_WRN("Failed to send SYNC packet: %d", errno);
-        return -errno;
-    }
-    LOG_INF("SYNC T0 sent (T0=%u)", pkt.T[0]);
-
-    /* --- Receive T1/T2 echo from parent --- */
     for (int attempt = 0; attempt < SYNC_MAX_RX_RETRIES; attempt++) {
+        /* Send T0 on every attempt so FT Relay gets it even if it wasn't ready */
+        struct sync_data pkt = {
+            .magic_signature = SYNC_MAGIC_SIGNATURE,
+        };
+        pkt.T[0] = k_uptime_get_32();
+
+        int ret = sendto(sync_socket, &pkt, sizeof(pkt), 0,
+                         (struct sockaddr *)&dst_addr, sizeof(dst_addr));
+        if (ret < 0) {
+            LOG_WRN("Failed to send SYNC packet: %d", errno);
+            continue;
+        }
+        LOG_INF("SYNC T0 sent (attempt %d, T0=%u)", attempt + 1, pkt.T[0]);
+
         struct sync_data rx;
         uint32_t rx_long_rd_id;
         uint32_t T3;
@@ -170,16 +169,8 @@ int sync_pt_operation(uint32_t parent_long_rd_id, int32_t *offset_out)
             continue;
         }
 
-        /* Traditional NTP (assumes symmetric delay):
-         *   offset = ((T1 - T0) + (T2 - T3)) / 2
-         *   delay  = (T3 - T0) - (T2 - T1)
-         *
-         * Simplified (assumes PT->FT propagation ≈ 0):
-         *   offset = T1 - T0
-         */
         int32_t T0 = (int32_t)pkt.T[0];
         int32_t T1 = (int32_t)rx.T[1];
-
         *offset_out = T1 - T0;
         LOG_INF("PT-FT clock offset: %d ms", *offset_out);
         return 0;
@@ -188,7 +179,6 @@ int sync_pt_operation(uint32_t parent_long_rd_id, int32_t *offset_out)
     LOG_WRN("SYNC PT: exhausted retries");
     return -ETIMEDOUT;
 }
-
 int sync_ft_operation(uint32_t child_long_rd_id)
 {
     if (sync_socket < 0) {
