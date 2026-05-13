@@ -1,7 +1,7 @@
 """
 nRF9151 DK Image Receiver with MQTT Publishing
-Wire format (93-byte header):
-  [MAGIC:4][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
+Wire format (97-byte header):
+  [MAGIC:8][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
   [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
   [payload:total_length][crc16:2]
 CRC covers header[4:] + payload.
@@ -17,9 +17,9 @@ import paho.mqtt.client as mqtt
 ROUTING_MAX_HOPS = 8
 MAGIC = b'\xAA\x55\xBB\x44'
 
-# Header size: 4 magic + 4 length + 4 seq + 4 timestamp + 4 offset + 1 num_links
-#              + 4*8 devices_visited + 4*8 per_link_delay + 1*8 per_link_rssi = 93 bytes
-HEADER_SIZE = (4 + 4 + 4 + 4 + 4 + 1
+# Header size: 8 magic + 4 length + 4 seq + 4 timestamp + 4 offset + 1 num_links
+#              + 4*8 devices_visited + 4*8 per_link_delay + 1*8 per_link_rssi = 97 bytes
+HEADER_SIZE = (8 + 4 + 4 + 4 + 4 + 1
                + (4 * ROUTING_MAX_HOPS)
                + (4 * ROUTING_MAX_HOPS)
                + (1 * ROUTING_MAX_HOPS))

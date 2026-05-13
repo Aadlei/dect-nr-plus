@@ -47,7 +47,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define COMMON_PORT 					12345
@@ -409,7 +409,7 @@ static void rx_thread(void)
             continue;
         }
 
-        uint32_t current_delay     = pkt_recv->route_delays.per_link_delay[route_delays_idx];
+        int32_t current_delay     = pkt_recv->route_delays.per_link_delay[route_delays_idx];
         uint32_t ft_this_timestamp = k_uptime_get_32();          // T_B
         uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
         int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
@@ -552,7 +552,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 		return;
 	}
 
-	uint32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
+	int32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
 	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
 	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
 	int32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
