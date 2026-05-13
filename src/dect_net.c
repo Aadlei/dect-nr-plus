@@ -131,7 +131,7 @@ void dect_net_start_scan(void)
         .channel_count = 0,
         .channel_scan_time_ms = 500,
     };
-    int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &p, sizeof(p));
+    int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &p, sizeof(p)); // Callback to NET_EVENT_DECT_SCAN_RESULT and NET_EVENT_DECT_SCAN_DONE
     if (ret) LOG_ERR("Scan start failed: %d", ret);
 }
 
@@ -161,7 +161,7 @@ void dect_net_join_best(void)
     ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &s, sizeof(s));
     if (ret) { LOG_ERR("Failed to write join settings: %d", ret); return; }
 
-    ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0);
+    ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
     if (ret) LOG_ERR("Network join failed: %d", ret);
     else     LOG_INF("Joining FT 0x%08x", best_long_rd_id);
 }

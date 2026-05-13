@@ -47,7 +47,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define COMMON_PORT 					12345
@@ -361,6 +361,8 @@ static void rx_thread(void)
         return;
     }
 
+
+
     while (true)
     {
         if (common_socket < 0)
@@ -413,11 +415,15 @@ static void rx_thread(void)
         int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
         uint32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
-		LOG_INF("current_delay: %u", current_delay);
-		LOG_INF("ft_this_timestamp: %u", ft_this_timestamp);
-		LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
-		LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
-		LOG_INF("cumulative_delay: %u", cumulative_delay);
+		// Only print for last packet in sequence
+		if (pkt_recv->packet_idx + 1 == pkt_recv->total_packets)
+		{
+			LOG_INF("current_delay: %u", current_delay);
+			LOG_INF("ft_this_timestamp: %u", ft_this_timestamp);
+			LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+			LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
+			LOG_INF("cumulative_delay: %u", cumulative_delay);
+		}	
 
         int8_t rx_rssi = dect_net_get_rx_rssi(&src_addr);
 
@@ -735,7 +741,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
-			
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
@@ -777,11 +782,11 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+		/*if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
 			break;
-		}
+		} */ // TEMP
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {

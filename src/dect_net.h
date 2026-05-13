@@ -8,10 +8,11 @@
 #include <stdbool.h>
 
 /* Device identities — single source of truth for the whole project */
-#define DECT_EDGE_PT_LONG_RD_ID   0xAABBCCDDU
-#define DECT_FT_LONG_RD_ID        0x12345678U
-#define DECT_PT_LONG_RD_ID        0x11223344U
-#define DECT_SINK_LONG_RD_ID      0x67214200U
+#define DECT_EDGE_PT_LONG_RD_ID     0xAABBCCDDU
+//#define DECT_EDGE_PT_LONG_RD_ID     0xCCDDEEFFU
+#define DECT_FT_LONG_RD_ID          0x12345678U
+#define DECT_PT_LONG_RD_ID          0x11223344U
+#define DECT_SINK_LONG_RD_ID        0x67214200U
 #define MESH_PREFIX_STR           "fd12:3456:789a"
 
 /* Must be called before any other dect_net function */
