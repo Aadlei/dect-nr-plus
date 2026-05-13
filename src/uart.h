@@ -46,7 +46,7 @@ int uart_data_init(void);
 int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta);
 int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta);
 int uart_stream_chunk(const uint8_t *data, uint16_t len);
-int uart_stream_end(void);
+int uart_stream_end(const struct packet_metadata *meta);
 int uart_rx_start(void);
 int uart_tx_thread_start(void);
 struct rx_chunk *uart_get_free_chunk(void);

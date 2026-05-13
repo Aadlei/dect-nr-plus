@@ -35,6 +35,8 @@ static bool uart_ready;
 static struct rx_chunk chunk_pool[CHUNK_POOL_COUNT];
 static struct k_fifo free_chunks;
 static struct k_fifo pending_chunks;
+static struct packet_metadata last_meta;
+static uint32_t last_total_size;
 
 extern uint32_t current_long_rd_id;
 extern uint32_t message_counter;
@@ -208,70 +210,25 @@ int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_me
 bool uart_is_ready(void) { return uart_ready; }
 
 /* ── Streaming API ── */
-
-int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
+int uart_stream_begin(uint32_t total_length)
 {
-    if (!uart_ready)
-        return -ENOTCONN;
-    if (stream_active)
-        LOG_WRN("Previous stream not finished");
- 
-    uint8_t header[STREAM_HEADER_SIZE] = {
-        MAGIC_0,
-        MAGIC_1,
-        MAGIC_2,
-        MAGIC_3,
-        MAGIC_0,
-        MAGIC_1,
-        MAGIC_2,
-        MAGIC_3,
+    if (!uart_ready) return -ENOTCONN;
+    if (stream_active) LOG_WRN("Previous stream not finished");
+
+    uint8_t header[12] = {
+        MAGIC_0, MAGIC_1, MAGIC_2, MAGIC_3,
+        MAGIC_0, MAGIC_1, MAGIC_2, MAGIC_3,
         (total_length >> 0) & 0xFF,
         (total_length >> 8) & 0xFF,
         (total_length >> 16) & 0xFF,
         (total_length >> 24) & 0xFF,
-        (meta->seq_num >> 0) & 0xFF,
-        (meta->seq_num >> 8) & 0xFF,
-        (meta->seq_num >> 16) & 0xFF,
-        (meta->seq_num >> 24) & 0xFF,
-        (meta->timestamp_pt >> 0) & 0xFF,
-        (meta->timestamp_pt >> 8) & 0xFF,
-        (meta->timestamp_pt >> 16) & 0xFF,
-        (meta->timestamp_pt >> 24) & 0xFF,
-        (meta->offset_pt_to_ft >> 0) & 0xFF,
-        (meta->offset_pt_to_ft >> 8) & 0xFF,
-        (meta->offset_pt_to_ft >> 16) & 0xFF,
-        (meta->offset_pt_to_ft >> 24) & 0xFF,
-        meta->route_delays.num_links,
     };
- 
-    int header_idx = 25; // NOTE: COUNT THE NUMBER OF BYTES IN rx_header
- 
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-        for (int j = 0; j < sizeof(meta->route_delays.devices_visited[0]); j++) {
-            header[header_idx++] = (meta->route_delays.devices_visited[i] >> (j * 8)) & 0xFF;
-        }
-    }
- 
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-        for (int j = 0; j < sizeof(meta->route_delays.per_link_delay[0]); j++) {
-            header[header_idx++] = (meta->route_delays.per_link_delay[i] >> (j * 8)) & 0xFF;
-        }
-    }
- 
-    /* NEW: per_link_rssi — one signed byte per hop */
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-        header[header_idx++] = (uint8_t)meta->route_delays.per_link_rssi[i];
-    }
- 
     uart_out_bytes(header, sizeof(header));
- 
-    stream_crc = crc16_update(0xFFFF, &header[8], sizeof(header) - 8);
+    stream_crc = crc16_update(0xFFFF, &header[8], 4);
     stream_active = true;
- 
     LOG_INF("UART stream start: %u bytes", total_length);
     return 0;
 }
-
 
 int uart_stream_chunk(const uint8_t *data, uint16_t len)
 {
@@ -282,17 +239,43 @@ int uart_stream_chunk(const uint8_t *data, uint16_t len)
     return 0;
 }
 
-int uart_stream_end(void)
+int uart_stream_end(const struct packet_metadata *meta)
 {
-    if (!stream_active)
-        return -EINVAL;
+    if (!stream_active) return -EINVAL;
+
+    uint8_t trailer[STREAM_HEADER_SIZE - 12]; // metadata without magic+length
+    int idx = 0;
+    trailer[idx++] = (meta->seq_num >> 0) & 0xFF;
+    trailer[idx++] = (meta->seq_num >> 8) & 0xFF;
+    trailer[idx++] = (meta->seq_num >> 16) & 0xFF;
+    trailer[idx++] = (meta->seq_num >> 24) & 0xFF;
+    trailer[idx++] = (meta->timestamp_pt >> 0) & 0xFF;
+    trailer[idx++] = (meta->timestamp_pt >> 8) & 0xFF;
+    trailer[idx++] = (meta->timestamp_pt >> 16) & 0xFF;
+    trailer[idx++] = (meta->timestamp_pt >> 24) & 0xFF;
+    trailer[idx++] = (meta->offset_pt_to_ft >> 0) & 0xFF;
+    trailer[idx++] = (meta->offset_pt_to_ft >> 8) & 0xFF;
+    trailer[idx++] = (meta->offset_pt_to_ft >> 16) & 0xFF;
+    trailer[idx++] = (meta->offset_pt_to_ft >> 24) & 0xFF;
+    trailer[idx++] = meta->route_delays.num_links;
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        for (int j = 0; j < 4; j++)
+            trailer[idx++] = (meta->route_delays.devices_visited[i] >> (j*8)) & 0xFF;
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        for (int j = 0; j < 4; j++)
+            trailer[idx++] = (meta->route_delays.per_link_delay[i] >> (j*8)) & 0xFF;
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        trailer[idx++] = (uint8_t)meta->route_delays.per_link_rssi[i];
+
+    stream_crc = crc16_update(stream_crc, trailer, sizeof(trailer));
+    uart_out_bytes(trailer, sizeof(trailer));
+
     uint8_t crc_bytes[] = {stream_crc & 0xFF, (stream_crc >> 8) & 0xFF};
     uart_out_bytes(crc_bytes, 2);
     LOG_INF("UART stream complete (CRC=0x%04X)", stream_crc);
     stream_active = false;
     return 0;
 }
-
 static void uart_tx_async_cb(const struct device *dev,
                               struct uart_event *evt, void *user_data)
 {
@@ -310,7 +293,8 @@ void uart_queue_chunk(struct rx_chunk *c) { k_fifo_put(&pending_chunks, c); }
 static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
 {
     static uint8_t payload_copy[MAX_PAYLOAD_SIZE];
-    uint16_t expected_total   = 0;
+    static struct packet_metadata last_meta;  // ADD THIS
+    uint16_t expected_total    = 0;
     uint16_t next_expected_idx = 0;
 
     while (1) {
@@ -325,41 +309,40 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         int32_t offset_pt_to_ft = pkt->offset_pt_to_ft;
         struct hop_delays route_delays = pkt->route_delays;
         memcpy(payload_copy, pkt->payload, payload_len);
-
         k_fifo_put(&free_chunks, chunk);
 
         if (packet_idx == 0) {
             if (stream_active) {
                 LOG_WRN("Aborting stale stream, new image starting");
-                uart_stream_end();
+                // can't call stream_end here without a meta — just reset
+                stream_active = false;
             }
             expected_total    = total_packets;
             next_expected_idx = 0;
-
-            struct packet_metadata meta = {
-                .seq_num         = message_counter++,
-                .timestamp_pt    = timestamp_pt,
-                .offset_pt_to_ft = offset_pt_to_ft,
-                .route_delays    = route_delays,
-            };
-            uart_stream_begin(total_size, &meta);
+            uart_stream_begin(total_size);  // no meta here anymore
         }
+
         if (packet_idx != next_expected_idx) {
             LOG_ERR("Gap: expected chunk %u, got %u — dropping image",
                     next_expected_idx, packet_idx);
-            if (stream_active) {
-                uart_stream_end();
-            }
+            stream_active = false;
             expected_total    = 0;
             next_expected_idx = 0;
             continue;
         }
 
+        // UPDATE last_meta every chunk — last chunk wins
+        last_meta.seq_num         = message_counter;
+        last_meta.timestamp_pt    = timestamp_pt;
+        last_meta.offset_pt_to_ft = offset_pt_to_ft;
+        last_meta.route_delays    = route_delays;
+
         uart_stream_chunk(payload_copy, payload_len);
         next_expected_idx++;
 
         if (next_expected_idx >= expected_total && expected_total > 0) {
-            uart_stream_end();
+            message_counter++;
+            uart_stream_end(&last_meta);  // last chunk's delay is now correct
             expected_total    = 0;
             next_expected_idx = 0;
         }

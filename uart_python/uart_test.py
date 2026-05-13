@@ -1,10 +1,11 @@
 """
 nRF9151 DK Image Receiver with MQTT Publishing
-Wire format (97-byte header):
-  [MAGIC:8][total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
+Wire format:
+  [MAGIC:8][total_length:4][payload:total_length]
+  [seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
   [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
-  [payload:total_length][crc16:2]
-CRC covers header[4:] + payload.
+  [crc16:2]
+CRC covers length + payload + metadata.
 """
 import serial
 import struct
@@ -15,14 +16,14 @@ from datetime import datetime
 import paho.mqtt.client as mqtt
 
 ROUTING_MAX_HOPS = 8
-MAGIC = b'\xAA\x55\xBB\x44'
+MAGIC = b'\xAA\x55\xBB\x44\xAA\x55\xBB\x44'
 
-# Header size: 8 magic + 4 length + 4 seq + 4 timestamp + 4 offset + 1 num_links
-#              + 4*8 devices_visited + 4*8 per_link_delay + 1*8 per_link_rssi = 97 bytes
-HEADER_SIZE = (8 + 4 + 4 + 4 + 4 + 1
-               + (4 * ROUTING_MAX_HOPS)
-               + (4 * ROUTING_MAX_HOPS)
-               + (1 * ROUTING_MAX_HOPS))
+HEADER_SIZE = 12  # magic(8) + total_length(4)
+
+METADATA_SIZE = (4 + 4 + 4 + 1
+                 + (4 * ROUTING_MAX_HOPS)
+                 + (4 * ROUTING_MAX_HOPS)
+                 + (1 * ROUTING_MAX_HOPS))  # 85 bytes
 
 def crc16(data: bytes) -> int:
     crc = 0xFFFF
@@ -35,18 +36,15 @@ def crc16(data: bytes) -> int:
                 crc >>= 1
     return crc
 
-def parse_header(buf):
-    """Parse header fields from buffer starting at magic bytes."""
-    total_length    = struct.unpack_from('<I', buf, 4)[0]
-    seq_num         = struct.unpack_from('<I', buf, 8)[0]
-    timestamp_pt    = struct.unpack_from('<I', buf, 12)[0]
-    offset_pt_to_ft = struct.unpack_from('<i', buf, 16)[0]  # signed
-    num_links       = buf[20]
-    devices_visited = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, 21))
-    per_link_delay  = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, 21 + 4 * ROUTING_MAX_HOPS))
-    per_link_rssi   = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}b', buf, 21 + 8 * ROUTING_MAX_HOPS))  # signed bytes
+def parse_metadata(buf, offset):
+    seq_num         = struct.unpack_from('<I', buf, offset)[0];      offset += 4
+    timestamp_pt    = struct.unpack_from('<I', buf, offset)[0];      offset += 4
+    offset_pt_to_ft = struct.unpack_from('<i', buf, offset)[0];      offset += 4
+    num_links       = buf[offset];                                    offset += 1
+    devices_visited = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, offset)); offset += 4 * ROUTING_MAX_HOPS
+    per_link_delay  = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}i', buf, offset)); offset += 4 * ROUTING_MAX_HOPS
+    per_link_rssi   = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}b', buf, offset))
     return {
-        'total_length':    total_length,
         'seq_num':         seq_num,
         'timestamp_pt':    timestamp_pt,
         'offset_pt_to_ft': offset_pt_to_ft,
@@ -87,7 +85,7 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
 
     print(f"=== nRF9151 Image Receiver ===")
     print(f"Port: {port}  Baud: {baudrate}")
-    print(f"Header size: {HEADER_SIZE} bytes  ROUTING_MAX_HOPS: {ROUTING_MAX_HOPS}")
+    print(f"Header: {HEADER_SIZE} bytes  Metadata: {METADATA_SIZE} bytes  ROUTING_MAX_HOPS: {ROUTING_MAX_HOPS}")
     print(f"Press Ctrl+C to stop\n")
 
     image_count = 0
@@ -105,9 +103,9 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                 magic_pos = buf.find(MAGIC)
 
                 if magic_pos == -1:
-                    if len(buf) > 3:
-                        print_log(buf[:-3])
-                        buf = buf[-3:]
+                    if len(buf) > 7:
+                        print_log(buf[:-7])
+                        buf = buf[-7:]
                     break
 
                 if magic_pos > 0:
@@ -117,28 +115,31 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                 if len(buf) < HEADER_SIZE:
                     break
 
-                hdr = parse_header(buf)
-                total_length = hdr['total_length']
+                total_length = struct.unpack_from('<I', buf, 8)[0]
 
                 if total_length == 0 or total_length > 1024 * 1024:
                     print(f"[WARN] Implausible length {total_length}, resyncing")
                     buf = buf[4:]
                     continue
 
-                frame_total = HEADER_SIZE + total_length + 2
+                frame_total = HEADER_SIZE + total_length + METADATA_SIZE + 2
                 if len(buf) < frame_total:
                     break
 
-                # CRC covers header[4:] + payload
-                meta_bytes = buf[4:HEADER_SIZE]
-                payload    = buf[HEADER_SIZE : HEADER_SIZE + total_length]
-                crc_recv   = struct.unpack_from('<H', buf, HEADER_SIZE + total_length)[0]
-                crc_calc   = crc16(meta_bytes + payload)
+                payload       = buf[HEADER_SIZE : HEADER_SIZE + total_length]
+                meta_start    = HEADER_SIZE + total_length
+                metadata_bytes = buf[meta_start : meta_start + METADATA_SIZE]
+                crc_recv      = struct.unpack_from('<H', buf, meta_start + METADATA_SIZE)[0]
+
+                # CRC covers length field + payload + metadata
+                crc_calc = crc16(buf[8:12] + payload + metadata_bytes)
 
                 if crc_recv != crc_calc:
                     print(f"[WARN] CRC mismatch (recv=0x{crc_recv:04X}, calc=0x{crc_calc:04X})")
                     buf = buf[4:]
                     continue
+
+                hdr = parse_metadata(buf, meta_start)
 
                 image_count += 1
                 ts = datetime.now()
@@ -150,6 +151,7 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                 print(f"  devices_visited={[hex(d) for d in hdr['devices_visited']]}")
                 print(f"  per_link_delay={hdr['per_link_delay']}")
                 print(f"  per_link_rssi={hdr['per_link_rssi']} dBm")
+
                 magic_in_payload = payload.count(MAGIC)
                 if magic_in_payload > 0:
                     print(f"  WARNING: Magic found {magic_in_payload} times in payload!")
