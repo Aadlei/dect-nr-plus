@@ -198,12 +198,11 @@ static void uart_out_bytes(const uint8_t *data, size_t len)
 
 int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta)
 {
-    int ret = uart_stream_begin(length, meta);
+    int ret = uart_stream_begin(length);
     if (ret)
         return ret;
-
     uart_stream_chunk(data, length);
-    uart_stream_end();
+    uart_stream_end(meta);
     return 0;
 }
 
