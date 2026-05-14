@@ -1,11 +1,12 @@
 """
 nRF9151 DK Image Receiver with MQTT Publishing
 Wire format:
-  [MAGIC:8][total_length:4][payload:total_length]
+  [MAGIC:8][total_length:4]
   [seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
   [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
+  [payload:total_length]
   [crc16:2]
-CRC covers length + payload + metadata.
+CRC covers total_length + metadata + payload (everything after the magic).
 """
 import serial
 import struct
@@ -18,12 +19,13 @@ import paho.mqtt.client as mqtt
 ROUTING_MAX_HOPS = 8
 MAGIC = b'\xAA\x55\xBB\x44\xAA\x55\xBB\x44'
 
-HEADER_SIZE = 12  # magic(8) + total_length(4)
-
 METADATA_SIZE = (4 + 4 + 4 + 1
                  + (4 * ROUTING_MAX_HOPS)
                  + (4 * ROUTING_MAX_HOPS)
                  + (1 * ROUTING_MAX_HOPS))  # 85 bytes
+
+# Full header = magic(8) + total_length(4) + all metadata(85)
+HEADER_SIZE = 8 + 4 + METADATA_SIZE  # 97 bytes
 
 def crc16(data: bytes) -> int:
     crc = 0xFFFF
@@ -122,17 +124,17 @@ def receive_images(port, baudrate, mqtt_broker, mqtt_port):
                     buf = buf[4:]
                     continue
 
-                frame_total = HEADER_SIZE + total_length + METADATA_SIZE + 2
+                frame_total = HEADER_SIZE + total_length + 2
                 if len(buf) < frame_total:
                     break
 
-                payload       = buf[HEADER_SIZE : HEADER_SIZE + total_length]
-                meta_start    = HEADER_SIZE + total_length
-                metadata_bytes = buf[meta_start : meta_start + METADATA_SIZE]
-                crc_recv      = struct.unpack_from('<H', buf, meta_start + METADATA_SIZE)[0]
+                # Metadata sits between total_length and payload
+                meta_start = 12  # after magic(8) + total_length(4)
+                payload    = buf[HEADER_SIZE : HEADER_SIZE + total_length]
+                crc_recv   = struct.unpack_from('<H', buf, HEADER_SIZE + total_length)[0]
 
-                # CRC covers length field + payload + metadata
-                crc_calc = crc16(buf[8:12] + payload + metadata_bytes)
+                # CRC covers everything after the magic: total_length + metadata + payload
+                crc_calc = crc16(buf[8 : HEADER_SIZE + total_length])
 
                 if crc_recv != crc_calc:
                     print(f"[WARN] CRC mismatch (recv=0x{crc_recv:04X}, calc=0x{crc_calc:04X})")

@@ -22,7 +22,7 @@ static k_tid_t spi_slave_thread_id;
 
 static uint8_t tx_buffer[TX_BUFFER_SIZE];
 static uint8_t rx_buffer[CHUNK_SIZE];
-static uint8_t image_buffer[MAX_IMAGE_SIZE]; // Full image accumulator
+static uint8_t image_buffer[MAX_IMAGE_SIZE];
 
 static size_t total_received = 0;
 static size_t image_size = 0;
@@ -55,17 +55,18 @@ static struct spi_buf rx_buf = {
 static struct spi_buf_set rx_buf_set = {
     .buffers = &rx_buf,
     .count = 1};
+
 static bool find_jpeg_end(uint8_t *buffer, size_t len, size_t *end_pos)
 {
     bool found = false;
-    
+
     if (len < 2) return false;
 
     for (size_t i = 0; i < len - 1; i++)
     {
         if (buffer[i] == 0xFF && buffer[i + 1] == 0xD9)
         {
-            *end_pos = i + 2; // Position after EOI marker
+            *end_pos = i + 2;
             found = true;
         }
     }
@@ -96,12 +97,11 @@ int spi_slave_init(void)
         LOG_ERR("GPIO device not ready");
         return -ENODEV;
     }
-    
+
     gpio_pin_configure(gpio_dev, READY_PIN, GPIO_OUTPUT_ACTIVE);
-    gpio_pin_set(gpio_dev, READY_PIN, 0);
+    gpio_pin_set(gpio_dev, READY_PIN, 0);  /* Not ready until thread arms */
 
     LOG_INF("Ready pin (P0.06) initialized");
-
     LOG_INF("SPI slave initialized: %s", spi_dev->name);
     return 0;
 }
@@ -120,7 +120,6 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     LOG_INF("SPI slave thread starting...");
 
     spi_dev = DEVICE_DT_GET(SPI_NODE);
-
     if (!device_is_ready(spi_dev))
     {
         LOG_ERR("SPI device not ready");
@@ -128,25 +127,43 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     }
 
     LOG_INF("SPI slave ready, waiting for master...");
-    gpio_pin_set(gpio_dev, READY_PIN, 1);
 
     while (1)
     {
-        memset(rx_buffer, 0, CHUNK_SIZE);
+        /* If the previous image has not been consumed yet, keep ready LOW and
+         * wait here. The SPI thread owns the ready pin — it will raise it once
+         * it re-arms spi_transceive. */
+        {
+            bool pending;
+            do {
+                k_mutex_lock(&image_mutex, K_FOREVER);
+                pending = new_image_available;
+                k_mutex_unlock(&image_mutex);
+                if (pending) k_sleep(K_MSEC(10));
+            } while (pending);
+        }
+
+        /* Arm the slave for the next chunk.
+         * Signal ready HIGH *before* calling spi_transceive. The Pi requires
+         * at least ~100µs of Python/ioctl overhead after seeing HIGH before CS
+         * is asserted, which is far longer than the ~5µs spi_transceive needs
+         * to arm the SPIS hardware. The race window is negligible in practice. */
         rx_buf.len = CHUNK_SIZE;
         tx_buf.len = TX_BUFFER_SIZE;
-
+        gpio_pin_set(gpio_dev, READY_PIN, 1);
         ret = spi_transceive(spi_dev, &spi_cfg, &tx_buf_set, &rx_buf_set);
+
+        /* Signal LOW immediately — tells Pi "I'm processing, don't send yet".
+         * Pi will wait for this LOW then the next HIGH before sending the
+         * following chunk. */
+        gpio_pin_set(gpio_dev, READY_PIN, 0);
 
         if (ret < 0)
         {
             LOG_ERR("SPI transceive failed: %d", ret);
-            k_sleep(K_MSEC(1000));
             continue;
         }
 
-        /* spi_transceive returns 0 on success (standard Zephyr SPIS).
-         * rx_buf.len is updated by the driver to reflect actual bytes received. */
         size_t bytes_received = rx_buf.len;
         if (bytes_received == 0)
             continue;
@@ -154,17 +171,6 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         /* Detect start of new image */
         if (rx_buffer[0] == 0xFF && rx_buffer[1] == 0xD8)
         {
-            /* Wait until the previous image has been consumed by the work handler */
-            bool still_pending = true;
-            while (still_pending)
-            {
-                k_mutex_lock(&image_mutex, K_FOREVER);
-                still_pending = new_image_available;
-                k_mutex_unlock(&image_mutex);
-                if (still_pending)
-                    k_sleep(K_MSEC(10));
-            }
-
             total_received = 0;
             receiving_image = true;
             prev_last_byte = 0;
@@ -187,8 +193,6 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         memcpy(image_buffer + total_received, rx_buffer, bytes_received);
         total_received += bytes_received;
 
-        /* Check for EOI — including the case where 0xFF ended the previous
-         * chunk and 0xD9 starts this one */
         bool eoi_found = false;
 
         if (prev_last_byte == 0xFF && rx_buffer[0] == 0xD9)
@@ -208,25 +212,24 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
             receiving_image = false;
             prev_last_byte = 0;
 
-            gpio_pin_set(gpio_dev, READY_PIN, 0);
-
             k_mutex_lock(&image_mutex, K_FOREVER);
             image_size = actual_size;
             new_image_available = true;
             k_mutex_unlock(&image_mutex);
 
             LOG_INF("Image complete: %zu bytes", actual_size);
+            /* Ready pin stays LOW. Loop restarts and waits at the top until
+             * the app consumes the image, then re-arms and raises ready. */
         }
         else
         {
             prev_last_byte = rx_buffer[bytes_received - 1];
+            /* Loop back immediately — ready will be raised at the top of the
+             * next iteration once spi_transceive is about to be called. */
         }
     }
 }
-// Potential risk/problem: Caller can read from image_buffer whilst it is being written
-// Explicitly handled: Master will not send new data before slave has transmitted and lowered the pin for flow control
-// Fix 1: Mutex for entire TX operation
-// Fix 2: Copy the image to another buffer to avoid race condition
+
 uint8_t *spi_slave_get_image_buffer(void)
 {
     return image_buffer;
@@ -255,10 +258,9 @@ void spi_slave_clear_image_flag(void)
     k_mutex_lock(&image_mutex, K_FOREVER);
     new_image_available = false;
     k_mutex_unlock(&image_mutex);
-    
-    // Signal ready for next image
-    gpio_pin_set(gpio_dev, READY_PIN, 1);
-    LOG_INF("Ready for next image");
+    /* Do NOT touch the ready pin here. The SPI thread owns it and will raise
+     * it on its next iteration once it has armed spi_transceive. */
+    LOG_INF("Image consumed, SPI thread will re-arm");
 }
 
 int spi_slave_start_thread(void)
