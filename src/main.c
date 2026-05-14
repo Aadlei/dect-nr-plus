@@ -712,6 +712,7 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 		if(*status == DECT_STATUS_OK)
 		{
 			LOG_INF("DECT stack deactivated successfully");
+			k_sem_give(&sem_activate);
 			
 		}
 		else
@@ -782,11 +783,11 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
 		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		/*if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+		/* if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
 			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
 					result->transmitter_long_rd_id);
 			break;
-		} */ // TEMP
+		} */
 
 		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
 		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
@@ -794,6 +795,38 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 			break;
     	}
 		#endif
+
+		// PT cheat: Skip specific FT long RD IDs
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		uint32_t this_long_rd_id = dect_net_get_current_long_rd_id();
+		uint32_t transmitter_long_rd_id = result->transmitter_long_rd_id;
+
+		if (this_long_rd_id == 0xAAAAAAAAU) {
+			if (transmitter_long_rd_id == 0xDDDDDDDDU || transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
+				break;
+			}
+		}
+		else if (this_long_rd_id == 0xCCCCCCCCU) {
+			if (transmitter_long_rd_id == 0xBBBBBBBBU || transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
+				break;
+			}
+		}
+		else if (this_long_rd_id == 0xEEEEEEEEU) {
+			if (transmitter_long_rd_id == 0xBBBBBBBBU || transmitter_long_rd_id == 0xDDDDDDDDU) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
+				break;
+			}
+		}
+		else {
+			LOG_ERR("current_device_type: %u | long_rd_id: %u", current_device_type, this_long_rd_id);
+			break;
+		}
+		#endif 
 
 		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
 				result->transmitter_long_rd_id, route->route_cost);
@@ -981,6 +1014,11 @@ int main(void)
 		return ret;
 	}
 #endif
+
+	ret = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+	if (ret) {
+		LOG_ERR("Failed to activate stack: %d", ret);
+	}
 
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate and settings to write...");

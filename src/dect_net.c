@@ -64,7 +64,10 @@ void dect_net_write_ft_settings(void)
 {
     struct dect_settings s = {0};
     int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &s, sizeof(s));
-    if (ret) { LOG_ERR("Failed to read settings: %d", ret); return; }
+    if (ret) {
+        LOG_ERR("Failed to read settings: %d", ret);
+        return;
+    }
 
     s.device_type = DECT_DEVICE_TYPE_FT;
 #if IS_ENABLED(CONFIG_DECT_RELAY_FT)
@@ -72,15 +75,23 @@ void dect_net_write_ft_settings(void)
 #else
     s.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
 #endif
+
+    // Disable auto-start
+    s.auto_start.activate = false;
+
     s.nw_beacon.channel       = 1657;
     s.nw_beacon.beacon_period = DECT_NW_BEACON_PERIOD_1000MS;
     s.cmd_params.write_scope_bitmap =
+        DECT_SETTINGS_WRITE_SCOPE_AUTO_START  |
         DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE |
         DECT_SETTINGS_WRITE_SCOPE_IDENTITIES  |
         DECT_SETTINGS_WRITE_SCOPE_NW_BEACON;
 
     ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &s, sizeof(s));
-    if (ret) { LOG_ERR("Failed to write settings: %d", ret); return; }
+    if (ret) {
+        LOG_ERR("Failed to write settings: %d", ret);
+        return;
+    }
 
     current_long_rd_id = s.identities.transmitter_long_rd_id;
     create_and_set_device_ipv6();
@@ -91,7 +102,10 @@ void dect_net_write_pt_settings(void)
 {
     struct dect_settings s = {0};
     int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &s, sizeof(s));
-    if (ret) { LOG_ERR("Failed to read settings: %d", ret); return; }
+    if (ret) {
+        LOG_ERR("Failed to read settings: %d", ret);
+        return; 
+    }
 
     s.device_type = DECT_DEVICE_TYPE_PT;
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
@@ -99,12 +113,20 @@ void dect_net_write_pt_settings(void)
 #else
     s.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
 #endif
+
+    // Disable auto-start
+    s.auto_start.activate = false;
+
     s.cmd_params.write_scope_bitmap =
+        DECT_SETTINGS_WRITE_SCOPE_AUTO_START  |
         DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE |
         DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
 
     ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &s, sizeof(s));
-    if (ret) { LOG_ERR("Failed to write settings: %d", ret); return; }
+    if (ret) {
+        LOG_ERR("Failed to write settings: %d", ret);
+        return;
+    }
 
     current_long_rd_id = s.identities.transmitter_long_rd_id;
     create_and_set_device_ipv6();
@@ -204,7 +226,7 @@ void dect_net_update_rssi(uint32_t long_rd_id, int8_t rssi)
     rssi_cache[0].rssi       = rssi;
 }
 
-int8_t dect_net_get_rx_rssi(const struct sockaddr_in6 *src_addr)
+int8_t dect_net_get_rx_rssi(struct sockaddr_in6 *src_addr)
 {
     uint32_t long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr->sin6_addr);
     if (long_rd_id == 0) return 0;

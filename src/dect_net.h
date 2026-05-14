@@ -8,11 +8,15 @@
 #include <stdbool.h>
 
 /* Device identities — single source of truth for the whole project */
-#define DECT_EDGE_PT_LONG_RD_ID     0xAABBCCDDU
-//#define DECT_EDGE_PT_LONG_RD_ID     0xCCDDEEFFU
-#define DECT_FT_LONG_RD_ID          0x12345678U
-#define DECT_PT_LONG_RD_ID          0x11223344U
-#define DECT_SINK_LONG_RD_ID        0x67214200U
+#define DECT_EDGE_PT_LONG_RD_ID     0xAAAAAAAAU
+
+#define DECT_FT_LONG_RD_ID          0xBBBBBBBBU
+#define DECT_PT_LONG_RD_ID          0xCCCCCCCCU
+
+//#define DECT_FT_LONG_RD_ID          0xDDDDDDDDU
+//#define DECT_PT_LONG_RD_ID          0xEEEEEEEEU
+
+#define DECT_SINK_LONG_RD_ID        0x67FFFFFFU
 #define MESH_PREFIX_STR           "fd12:3456:789a"
 
 /* Must be called before any other dect_net function */
@@ -37,6 +41,6 @@ bool                 dect_net_create_ipv6(struct in6_addr *addr, uint32_t long_r
 
 /* RSSI — update called from NET_EVENT_DECT_NEIGHBOR_INFO handler */
 void   dect_net_update_rssi(uint32_t long_rd_id, int8_t rssi);
-int8_t dect_net_get_rx_rssi(const struct sockaddr_in6 *src_addr);
+int8_t dect_net_get_rx_rssi(struct sockaddr_in6 *src_addr);
 
 #endif /* DECT_NET_H */
