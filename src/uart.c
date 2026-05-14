@@ -198,32 +198,77 @@ static void uart_out_bytes(const uint8_t *data, size_t len)
 
 int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta)
 {
-    int ret = uart_stream_begin(length);
+    int ret = uart_stream_begin(length, meta);
     if (ret)
         return ret;
     uart_stream_chunk(data, length);
-    uart_stream_end(meta);
+    uart_stream_end();
     return 0;
 }
 
 bool uart_is_ready(void) { return uart_ready; }
 
 /* ── Streaming API ── */
-int uart_stream_begin(uint32_t total_length)
+int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta)
 {
     if (!uart_ready) return -ENOTCONN;
     if (stream_active) LOG_WRN("Previous stream not finished");
 
-    uint8_t header[12] = {
-        MAGIC_0, MAGIC_1, MAGIC_2, MAGIC_3,
-        MAGIC_0, MAGIC_1, MAGIC_2, MAGIC_3,
-        (total_length >> 0) & 0xFF,
-        (total_length >> 8) & 0xFF,
-        (total_length >> 16) & 0xFF,
-        (total_length >> 24) & 0xFF,
-    };
+    /* Full header: magic(8) + total_length(4) + all metadata fields.
+     * Layout must match READ_HEADER in the RX state machine exactly. */
+    uint8_t header[STREAM_HEADER_SIZE];
+    int idx = 0;
+
+    /* Magic */
+    header[idx++] = MAGIC_0; header[idx++] = MAGIC_1;
+    header[idx++] = MAGIC_2; header[idx++] = MAGIC_3;
+    header[idx++] = MAGIC_0; header[idx++] = MAGIC_1;
+    header[idx++] = MAGIC_2; header[idx++] = MAGIC_3;
+
+    /* total_length */
+    header[idx++] = (total_length >>  0) & 0xFF;
+    header[idx++] = (total_length >>  8) & 0xFF;
+    header[idx++] = (total_length >> 16) & 0xFF;
+    header[idx++] = (total_length >> 24) & 0xFF;
+
+    /* seq_num */
+    header[idx++] = (meta->seq_num >>  0) & 0xFF;
+    header[idx++] = (meta->seq_num >>  8) & 0xFF;
+    header[idx++] = (meta->seq_num >> 16) & 0xFF;
+    header[idx++] = (meta->seq_num >> 24) & 0xFF;
+
+    /* timestamp_pt */
+    header[idx++] = (meta->timestamp_pt >>  0) & 0xFF;
+    header[idx++] = (meta->timestamp_pt >>  8) & 0xFF;
+    header[idx++] = (meta->timestamp_pt >> 16) & 0xFF;
+    header[idx++] = (meta->timestamp_pt >> 24) & 0xFF;
+
+    /* offset_pt_to_ft */
+    header[idx++] = ((uint32_t)meta->offset_pt_to_ft >>  0) & 0xFF;
+    header[idx++] = ((uint32_t)meta->offset_pt_to_ft >>  8) & 0xFF;
+    header[idx++] = ((uint32_t)meta->offset_pt_to_ft >> 16) & 0xFF;
+    header[idx++] = ((uint32_t)meta->offset_pt_to_ft >> 24) & 0xFF;
+
+    /* num_links */
+    header[idx++] = meta->route_delays.num_links;
+
+    /* devices_visited */
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        for (int j = 0; j < 4; j++)
+            header[idx++] = (meta->route_delays.devices_visited[i] >> (j * 8)) & 0xFF;
+
+    /* per_link_delay */
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        for (int j = 0; j < 4; j++)
+            header[idx++] = ((uint32_t)meta->route_delays.per_link_delay[i] >> (j * 8)) & 0xFF;
+
+    /* per_link_rssi */
+    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
+        header[idx++] = (uint8_t)meta->route_delays.per_link_rssi[i];
+
     uart_out_bytes(header, sizeof(header));
-    stream_crc = crc16_update(0xFFFF, &header[8], 4);
+    /* CRC covers everything after the magic (i.e., from total_length onwards) */
+    stream_crc = crc16_update(0xFFFF, &header[8], STREAM_HEADER_SIZE - 8);
     stream_active = true;
     LOG_INF("UART stream start: %u bytes", total_length);
     return 0;
@@ -238,37 +283,11 @@ int uart_stream_chunk(const uint8_t *data, uint16_t len)
     return 0;
 }
 
-int uart_stream_end(const struct packet_metadata *meta)
+int uart_stream_end(void)
 {
     if (!stream_active) return -EINVAL;
 
-    uint8_t trailer[STREAM_HEADER_SIZE - 12]; // metadata without magic+length
-    int idx = 0;
-    trailer[idx++] = (meta->seq_num >> 0) & 0xFF;
-    trailer[idx++] = (meta->seq_num >> 8) & 0xFF;
-    trailer[idx++] = (meta->seq_num >> 16) & 0xFF;
-    trailer[idx++] = (meta->seq_num >> 24) & 0xFF;
-    trailer[idx++] = (meta->timestamp_pt >> 0) & 0xFF;
-    trailer[idx++] = (meta->timestamp_pt >> 8) & 0xFF;
-    trailer[idx++] = (meta->timestamp_pt >> 16) & 0xFF;
-    trailer[idx++] = (meta->timestamp_pt >> 24) & 0xFF;
-    trailer[idx++] = (meta->offset_pt_to_ft >> 0) & 0xFF;
-    trailer[idx++] = (meta->offset_pt_to_ft >> 8) & 0xFF;
-    trailer[idx++] = (meta->offset_pt_to_ft >> 16) & 0xFF;
-    trailer[idx++] = (meta->offset_pt_to_ft >> 24) & 0xFF;
-    trailer[idx++] = meta->route_delays.num_links;
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
-        for (int j = 0; j < 4; j++)
-            trailer[idx++] = (meta->route_delays.devices_visited[i] >> (j*8)) & 0xFF;
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
-        for (int j = 0; j < 4; j++)
-            trailer[idx++] = (meta->route_delays.per_link_delay[i] >> (j*8)) & 0xFF;
-    for (int i = 0; i < ROUTING_MAX_HOPS; i++)
-        trailer[idx++] = (uint8_t)meta->route_delays.per_link_rssi[i];
-
-    stream_crc = crc16_update(stream_crc, trailer, sizeof(trailer));
-    uart_out_bytes(trailer, sizeof(trailer));
-
+    /* Metadata was sent in uart_stream_begin; only the CRC remains. */
     uint8_t crc_bytes[] = {stream_crc & 0xFF, (stream_crc >> 8) & 0xFF};
     uart_out_bytes(crc_bytes, 2);
     LOG_INF("UART stream complete (CRC=0x%04X)", stream_crc);
@@ -292,7 +311,7 @@ void uart_queue_chunk(struct rx_chunk *c) { k_fifo_put(&pending_chunks, c); }
 static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
 {
     static uint8_t payload_copy[MAX_PAYLOAD_SIZE];
-    static struct packet_metadata last_meta;  // ADD THIS
+    static struct packet_metadata first_meta;
     uint16_t expected_total    = 0;
     uint16_t next_expected_idx = 0;
 
@@ -313,12 +332,19 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         if (packet_idx == 0) {
             if (stream_active) {
                 LOG_WRN("Aborting stale stream, new image starting");
-                // can't call stream_end here without a meta — just reset
                 stream_active = false;
             }
             expected_total    = total_packets;
             next_expected_idx = 0;
-            uart_stream_begin(total_size);  // no meta here anymore
+
+            /* Capture metadata from the first chunk — all chunks in the
+             * same image carry identical metadata, so this is authoritative. */
+            first_meta.seq_num         = message_counter;
+            first_meta.timestamp_pt    = timestamp_pt;
+            first_meta.offset_pt_to_ft = offset_pt_to_ft;
+            first_meta.route_delays    = route_delays;
+
+            uart_stream_begin(total_size, &first_meta);
         }
 
         if (packet_idx != next_expected_idx) {
@@ -330,18 +356,12 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             continue;
         }
 
-        // UPDATE last_meta every chunk — last chunk wins
-        last_meta.seq_num         = message_counter;
-        last_meta.timestamp_pt    = timestamp_pt;
-        last_meta.offset_pt_to_ft = offset_pt_to_ft;
-        last_meta.route_delays    = route_delays;
-
         uart_stream_chunk(payload_copy, payload_len);
         next_expected_idx++;
 
         if (next_expected_idx >= expected_total && expected_total > 0) {
             message_counter++;
-            uart_stream_end(&last_meta);  // last chunk's delay is now correct
+            uart_stream_end();
             expected_total    = 0;
             next_expected_idx = 0;
         }
