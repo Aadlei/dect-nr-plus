@@ -151,7 +151,7 @@ void dect_net_start_scan(void)
     struct dect_scan_params p = {
         .band = 1,
         .channel_count = 0,
-        .channel_scan_time_ms = 500,
+        .channel_scan_time_ms = 1200,
     };
     int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &p, sizeof(p)); // Callback to NET_EVENT_DECT_SCAN_RESULT and NET_EVENT_DECT_SCAN_DONE
     if (ret) LOG_ERR("Scan start failed: %d", ret);
