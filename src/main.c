@@ -47,13 +47,13 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		500
+#define WORK_RESCHEDULE_TIME_SEC 		10
 
 
 // Networ interface
@@ -114,16 +114,16 @@ static void check_spi_image_work_handler(struct k_work *work)
 	// First check if dect is connected so device can transmit
 	if (!dect_connected)
 	{
-		LOG_ERR("DECT not connected! Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+		LOG_ERR("DECT not connected! Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 		return;
 	}
 
 	// No TX if no new image is available
     if (!spi_slave_is_new_image_available())
 	{
-		LOG_WRN("No new image available. Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+		LOG_WRN("No new image available. Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 		return;
 	}
 
@@ -136,8 +136,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 	uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
 	if (parent_long_rd_id == 0)
 	{
-		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d seconds", WORK_RESCHEDULE_TIME_SEC);
+		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 		return;
 	}
 
@@ -155,8 +155,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 	spi_slave_clear_image_flag();
 
 	// Reschedule work
-	LOG_INF("Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-	k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
+	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 } /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 #elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
@@ -745,17 +745,13 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
 		}
-		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED) {
-			LOG_WRN("Network unjoined");
-			#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-			k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
-			#endif
+		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
+		{
+			LOG_INF("Network unjoined");
 		}
-		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE) {
+		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
+		{
 			LOG_ERR("Network failure");
-			#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-			k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
-			#endif
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
 		{
@@ -843,18 +839,14 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 	}
 
 	case NET_EVENT_DECT_SCAN_DONE: {
-    if (dect_net_has_best_ft()) {
-        dect_net_join_best();
-        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-        // Watchdog: if no association within 15s, rescan
-        k_work_schedule(&pt_reconnect_work, K_SECONDS(15));
-        #endif
-    } else {
-        k_msleep(NW_SCAN_RETRY_MS);
-        dect_net_start_scan();
-    }
-    break;
-}
+		if (dect_net_has_best_ft()) {
+			dect_net_join_best();
+		} else {
+			k_msleep(NW_SCAN_RETRY_MS);
+			dect_net_start_scan();
+		}
+        break;
+	}
 
     case NET_EVENT_DECT_RSSI_SCAN_RESULT: {
         const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
@@ -896,7 +888,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
         #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
         if (evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT) {
-            k_work_cancel_delayable(&pt_reconnect_work); // cancel watchdog
             k_work_schedule(&pt_post_assoc_work, K_NO_WAIT);
         }
         #endif
@@ -1011,6 +1002,10 @@ int main(void)
 
 	dect_net_init(dect_iface);
 
+	// Write settings
+	if (current_device_type & DECT_DEVICE_TYPE_FT) dect_net_write_ft_settings();
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) dect_net_write_pt_settings();
+
 	sync_init(dect_iface, dect_net_get_mesh_prefix(), DECT_SINK_LONG_RD_ID);
 
 	// Initialize modem library and this triggers DECT NR+ stack initialization
@@ -1030,9 +1025,6 @@ int main(void)
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate and settings to write...");
 	k_sem_take(&sem_activate, K_FOREVER);
-	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) dect_net_write_ft_settings();
-	else if (current_device_type & DECT_DEVICE_TYPE_PT) dect_net_write_pt_settings();
 
 	LOG_INF("Hello DECT application started successfully");
 
