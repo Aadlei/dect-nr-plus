@@ -745,13 +745,17 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
 		}
-		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
-		{
-			LOG_INF("Network unjoined");
+		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED) {
+			LOG_WRN("Network unjoined");
+			#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+			k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
+			#endif
 		}
-		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE)
-		{
+		else if (status->network_status == DECT_NETWORK_STATUS_FAILURE) {
 			LOG_ERR("Network failure");
+			#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+			k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
+			#endif
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_REMOVED)
 		{
@@ -839,14 +843,18 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 	}
 
 	case NET_EVENT_DECT_SCAN_DONE: {
-		if (dect_net_has_best_ft()) {
-			dect_net_join_best();
-		} else {
-			k_msleep(NW_SCAN_RETRY_MS);
-			dect_net_start_scan();
-		}
-        break;
-	}
+    if (dect_net_has_best_ft()) {
+        dect_net_join_best();
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        // Watchdog: if no association within 15s, rescan
+        k_work_schedule(&pt_reconnect_work, K_SECONDS(15));
+        #endif
+    } else {
+        k_msleep(NW_SCAN_RETRY_MS);
+        dect_net_start_scan();
+    }
+    break;
+}
 
     case NET_EVENT_DECT_RSSI_SCAN_RESULT: {
         const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
@@ -888,6 +896,7 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
         #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
         if (evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT) {
+            k_work_cancel_delayable(&pt_reconnect_work); // cancel watchdog
             k_work_schedule(&pt_post_assoc_work, K_NO_WAIT);
         }
         #endif
