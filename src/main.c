@@ -1002,10 +1002,6 @@ int main(void)
 
 	dect_net_init(dect_iface);
 
-	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) dect_net_write_ft_settings();
-	else if (current_device_type & DECT_DEVICE_TYPE_PT) dect_net_write_pt_settings();
-
 	sync_init(dect_iface, dect_net_get_mesh_prefix(), DECT_SINK_LONG_RD_ID);
 
 	// Initialize modem library and this triggers DECT NR+ stack initialization
@@ -1025,6 +1021,9 @@ int main(void)
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate and settings to write...");
 	k_sem_take(&sem_activate, K_FOREVER);
+	// Write settings
+	if (current_device_type & DECT_DEVICE_TYPE_FT) dect_net_write_ft_settings();
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) dect_net_write_pt_settings();
 
 	LOG_INF("Hello DECT application started successfully");
 

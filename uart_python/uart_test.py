@@ -1,14 +1,15 @@
 """
 DECT NR+ Mesh — UART → MQTT Bridge
 
-Wire format (uart.c):
+Wire format (uart.c — old format, metadata trailer after payload):
   [MAGIC:8]
-  [total_length:4][seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
-  [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
+  [total_length:4]
   [payload:total_length]
+  [seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
+  [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
   [crc16:2]
 
-CRC covers everything after the magic (total_length + metadata + payload).
+CRC covers everything after the magic (total_length + payload + metadata).
 """
 
 import argparse
@@ -23,7 +24,7 @@ import serial
 ROUTING_MAX_HOPS = 8
 MAGIC            = b'\xAA\x55\xBB\x44\xAA\x55\xBB\x44'
 METADATA_SIZE    = 4 + 4 + 4 + 1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS) + ROUTING_MAX_HOPS  # 85
-HEADER_SIZE      = len(MAGIC) + 4 + METADATA_SIZE  # 97
+FRAME_OVERHEAD   = len(MAGIC) + 4 + METADATA_SIZE + 2  # 99  (no payload)
 
 
 # ── CRC ──────────────────────────────────────────────────────────────────────
@@ -39,9 +40,8 @@ def crc16(data: bytes) -> int:
 
 # ── Parsing ───────────────────────────────────────────────────────────────────
 
-def parse_header(buf: bytes, offset: int) -> dict:
-    """Parse the 89-byte block starting at offset (right after magic)."""
-    total_length    = struct.unpack_from('<I', buf, offset)[0];     offset += 4
+def parse_metadata(buf: bytes, offset: int) -> dict:
+    """Parse the 85-byte metadata trailer starting at offset."""
     seq_num         = struct.unpack_from('<I', buf, offset)[0];     offset += 4
     timestamp_pt    = struct.unpack_from('<I', buf, offset)[0];     offset += 4
     offset_pt_to_ft = struct.unpack_from('<i', buf, offset)[0];     offset += 4
@@ -52,7 +52,6 @@ def parse_header(buf: bytes, offset: int) -> dict:
 
     n = num_links + 1
     return {
-        'total_length':    total_length,
         'seq_num':         seq_num,
         'timestamp_pt':    timestamp_pt,
         'offset_pt_to_ft': offset_pt_to_ft,
@@ -96,7 +95,7 @@ def receive_images(port: str, baudrate: int, mqtt_broker: str, mqtt_port: int):
         sys.exit(1)
 
     print(f"Port: {port}  Baud: {baudrate}")
-    print(f"HEADER_SIZE={HEADER_SIZE}  METADATA_SIZE={METADATA_SIZE}  ROUTING_MAX_HOPS={ROUTING_MAX_HOPS}")
+    print(f"METADATA_SIZE={METADATA_SIZE}  FRAME_OVERHEAD={FRAME_OVERHEAD}  ROUTING_MAX_HOPS={ROUTING_MAX_HOPS}")
     print("Press Ctrl+C to stop\n")
 
     image_count = 0
@@ -124,30 +123,38 @@ def receive_images(port: str, baudrate: int, mqtt_broker: str, mqtt_port: int):
                     print_log(buf[:magic_pos])
                     buf = buf[magic_pos:]
 
-                if len(buf) < HEADER_SIZE:
+                # Need at least magic + total_length to proceed
+                if len(buf) < len(MAGIC) + 4:
                     break
 
-                hdr = parse_header(buf, len(MAGIC))
-                total_length = hdr['total_length']
+                total_length = struct.unpack_from('<I', buf, len(MAGIC))[0]
 
                 if total_length == 0 or total_length > 1024 * 1024:
                     print(f"[WARN] implausible total_length={total_length}, resyncing")
                     buf = buf[len(MAGIC):]
                     continue
 
-                frame_size = HEADER_SIZE + total_length + 2
+                frame_size = FRAME_OVERHEAD + total_length
                 if len(buf) < frame_size:
                     break
 
-                payload  = buf[HEADER_SIZE : HEADER_SIZE + total_length]
-                crc_recv = struct.unpack_from('<H', buf, HEADER_SIZE + total_length)[0]
-                crc_calc = crc16(buf[len(MAGIC) : HEADER_SIZE + total_length])
+                # Layout: [MAGIC:8][total_length:4][payload:N][metadata:85][crc:2]
+                payload_start = len(MAGIC) + 4
+                meta_start    = payload_start + total_length
+                crc_start     = meta_start + METADATA_SIZE
+
+                payload  = buf[payload_start : meta_start]
+                crc_recv = struct.unpack_from('<H', buf, crc_start)[0]
+
+                # CRC over: total_length(4) + payload(N) + metadata(85)
+                crc_calc = crc16(buf[len(MAGIC) : crc_start])
 
                 if crc_recv != crc_calc:
                     print(f"[WARN] CRC mismatch recv=0x{crc_recv:04X} calc=0x{crc_calc:04X}, resyncing")
                     buf = buf[len(MAGIC):]
                     continue
 
+                hdr = parse_metadata(buf, meta_start)
                 image_count += 1
                 kb = total_length / 1024
 
@@ -162,7 +169,9 @@ def receive_images(port: str, baudrate: int, mqtt_broker: str, mqtt_port: int):
                     meta = {
                         "timestamp":        datetime.now().timestamp(),
                         "seq_num":          hdr['seq_num'],
+                        "image_count":      image_count,
                         "size_bytes":       total_length,
+                        "size_kb":          round(kb, 2),
                         "crc":              f"0x{crc_calc:04X}",
                         "num_links":        hdr['num_links'],
                         "timestamp_pt":     hdr['timestamp_pt'],
