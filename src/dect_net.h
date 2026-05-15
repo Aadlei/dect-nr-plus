@@ -10,11 +10,11 @@
 /* Device identities — single source of truth for the whole project */
 #define DECT_EDGE_PT_LONG_RD_ID     0xAAAAAAAAU
 
-#define DECT_FT_LONG_RD_ID          0xBBBBBBBBU
-#define DECT_PT_LONG_RD_ID          0xCCCCCCCCU
+//#define DECT_FT_LONG_RD_ID          0xBBBBBBBBU
+//#define DECT_PT_LONG_RD_ID          0xCCCCCCCCU
 
-//#define DECT_FT_LONG_RD_ID          0xDDDDDDDDU
-//#define DECT_PT_LONG_RD_ID          0xEEEEEEEEU
+#define DECT_FT_LONG_RD_ID          0xDDDDDDDDU
+#define DECT_PT_LONG_RD_ID          0xEEEEEEEEU
 
 #define DECT_SINK_LONG_RD_ID        0x67FFFFFFU
 #define MESH_PREFIX_STR           "fd12:3456:789a"

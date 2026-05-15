@@ -47,13 +47,13 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_SEC 		10
+#define WORK_RESCHEDULE_TIME_MSEC 		500
 
 
 // Networ interface
@@ -114,16 +114,16 @@ static void check_spi_image_work_handler(struct k_work *work)
 	// First check if dect is connected so device can transmit
 	if (!dect_connected)
 	{
-		LOG_ERR("DECT not connected! Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+		LOG_ERR("DECT not connected! Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
+		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
 		return;
 	}
 
 	// No TX if no new image is available
     if (!spi_slave_is_new_image_available())
 	{
-		LOG_WRN("No new image available. Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+		LOG_WRN("No new image available. Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
+		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
 		return;
 	}
 
@@ -136,8 +136,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 	uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
 	if (parent_long_rd_id == 0)
 	{
-		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d seconds", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d ms", WORK_RESCHEDULE_TIME_MSEC);
+		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
 		return;
 	}
 
@@ -155,8 +155,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 	spi_slave_clear_image_flag();
 
 	// Reschedule work
-	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
+	LOG_INF("Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
+	k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
 } /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 #elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
