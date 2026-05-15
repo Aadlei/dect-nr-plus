@@ -319,8 +319,8 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             next_expected_idx = 0;
 
             last_meta.seq_num         = pkt->seq_num;
-            last_meta.timestamp_pt    = timestamp_pt;
-            last_meta.offset_pt_to_ft = offset_pt_to_ft;
+            last_meta.timestamp_pt    = k_uptime_get_32(); 
+            last_meta.offset_pt_to_ft = 0;                 
             last_meta.route_delays    = route_delays;
             uart_stream_begin(total_size);  // no meta here anymore
         }

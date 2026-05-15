@@ -150,7 +150,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	empty_delay_information.devices_visited[0] = dect_net_get_current_long_rd_id();
 
 	static uint16_t image_seq_num = 0;
-	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id, image_seq_num);
+	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id, image_seq_num++);
 
 	spi_slave_clear_image_flag();
 
