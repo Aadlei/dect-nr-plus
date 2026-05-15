@@ -19,6 +19,7 @@ struct data_packet {
     uint16_t packet_idx;
     uint16_t total_packets;
     uint32_t total_data_size;
+    uint16_t seq_num;
     uint32_t timestamp_pt;
     int32_t  offset_pt_to_ft;
     struct hop_delays route_delays;
@@ -44,9 +45,9 @@ struct packet_metadata {
 
 int uart_data_init(void);
 int uart_send_image(const uint8_t *data, uint32_t length, const struct packet_metadata *meta);
-int uart_stream_begin(uint32_t total_length, const struct packet_metadata *meta);
+int uart_stream_begin(uint32_t total_length);
 int uart_stream_chunk(const uint8_t *data, uint16_t len);
-int uart_stream_end();
+int uart_stream_end(const struct packet_metadata *meta);
 int uart_rx_start(void);
 int uart_tx_thread_start(void);
 struct rx_chunk *uart_get_free_chunk(void);

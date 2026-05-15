@@ -98,7 +98,7 @@ static void close_common_socket(void);
 
 // TX and RX threads
 static void rx_thread(void);
-static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id);
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id, uint16_t seq_num);
 
 
 // Main thread operations
@@ -149,7 +149,8 @@ static void check_spi_image_work_handler(struct k_work *work)
 	};
 	empty_delay_information.devices_visited[0] = dect_net_get_current_long_rd_id();
 
-	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id);
+	static uint16_t image_seq_num = 0;
+	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id, image_seq_num);
 
 	spi_slave_clear_image_flag();
 
@@ -451,7 +452,7 @@ static void rx_thread(void)
 
     free(pkt_recv);
 }
-static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id)
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id, uint16_t seq_num)
 {
 	int ret = -1;
 
@@ -498,6 +499,7 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 		packet->packet_idx = i;
 		packet->total_packets = total_chunks;
 		packet->total_data_size = image_size;
+		packet->seq_num = seq_num;
 		
 		// Time/delays related
 		packet->timestamp_pt = time_tx;
@@ -581,7 +583,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	delay_information.devices_visited[route_delays_idx] = dect_net_get_current_long_rd_id();
 
     LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", data_size, parent_long_rd_id);
-	tx_img_data(data, data_size, delay_information, parent_long_rd_id);
+	tx_img_data(data, data_size, delay_information, parent_long_rd_id, meta->seq_num);
 }
 #endif
 

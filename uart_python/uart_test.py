@@ -1,204 +1,235 @@
+#!/usr/bin/env python3
 """
-nRF9151 DK Image Receiver with MQTT Publishing
-Wire format:
-  [MAGIC:8][total_length:4]
-  [seq_num:4][timestamp_pt:4][offset_pt_to_ft:4]
-  [num_links:1][devices_visited:32][per_link_delay:32][per_link_rssi:8]
-  [payload:total_length]
-  [crc16:2]
-CRC covers total_length + metadata + payload (everything after the magic).
+DECT NR+ Mesh Network – UART → MQTT Bridge
+Parses assembled image frames from the sink FT UART output and publishes to MQTT.
+
+UART frame format (produced by uart.c):
+  [MAGIC: 8 bytes = AA 55 BB 44 AA 55 BB 44]
+  [total_length: 4 bytes LE]
+  [payload: total_length bytes  (raw image data)]
+  [seq_num: 4 bytes LE]
+  [timestamp_pt: 4 bytes LE]
+  [offset_pt_to_ft: 4 bytes LE, signed]
+  [num_links: 1 byte]
+  [devices_visited: 4 * ROUTING_MAX_HOPS bytes LE]
+  [per_link_delay: 4 * ROUTING_MAX_HOPS bytes LE, signed]
+  [per_link_rssi: 1 * ROUTING_MAX_HOPS bytes, signed]
+  [CRC16/Modbus: 2 bytes LE]  — covers total_length + payload + all metadata above
+
+CRC covers: total_length(4) + payload(variable) + metadata(85) bytes.
 """
-import serial
-import struct
-import sys
+
 import argparse
+import base64
 import json
-from datetime import datetime
+import logging
+import struct
+import time
+
 import paho.mqtt.client as mqtt
+import serial
+
+# ── Constants ────────────────────────────────────────────────────────────────
+
+MAGIC = bytes([0xAA, 0x55, 0xBB, 0x44, 0xAA, 0x55, 0xBB, 0x44])
 
 ROUTING_MAX_HOPS = 8
-MAGIC = b'\xAA\x55\xBB\x44\xAA\x55\xBB\x44'
 
-METADATA_SIZE = (4 + 4 + 4 + 1
-                 + (4 * ROUTING_MAX_HOPS)
-                 + (4 * ROUTING_MAX_HOPS)
-                 + (1 * ROUTING_MAX_HOPS))  # 85 bytes
+# seq_num(4) + timestamp_pt(4) + offset_pt_to_ft(4) + num_links(1)
+# + devices_visited(4*8) + per_link_delay(4*8) + per_link_rssi(8)
+META_SIZE = 4 + 4 + 4 + 1 + (4 * ROUTING_MAX_HOPS) + (4 * ROUTING_MAX_HOPS) + ROUTING_MAX_HOPS
+assert META_SIZE == 85
 
-# Full header = magic(8) + total_length(4) + all metadata(85)
-HEADER_SIZE = 8 + 4 + METADATA_SIZE  # 97 bytes
+MAX_IMAGE_BYTES = 1024 * 1024  # 1 MB sanity limit
 
-def crc16(data: bytes) -> int:
+# ── Logging ──────────────────────────────────────────────────────────────────
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("dect_bridge")
+
+# ── CRC ──────────────────────────────────────────────────────────────────────
+
+def crc16_modbus(data: bytes) -> int:
     crc = 0xFFFF
     for b in data:
         crc ^= b
         for _ in range(8):
-            if crc & 1:
-                crc = (crc >> 1) ^ 0xA001
-            else:
-                crc >>= 1
-    return crc
+            crc = (crc >> 1) ^ 0xA001 if (crc & 1) else crc >> 1
+    return crc & 0xFFFF
 
-def parse_metadata(buf, offset):
-    seq_num         = struct.unpack_from('<I', buf, offset)[0];      offset += 4
-    timestamp_pt    = struct.unpack_from('<I', buf, offset)[0];      offset += 4
-    offset_pt_to_ft = struct.unpack_from('<i', buf, offset)[0];      offset += 4
-    num_links       = buf[offset];                                    offset += 1
-    devices_visited = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}I', buf, offset)); offset += 4 * ROUTING_MAX_HOPS
-    per_link_delay  = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}i', buf, offset)); offset += 4 * ROUTING_MAX_HOPS
-    per_link_rssi   = list(struct.unpack_from(f'<{ROUTING_MAX_HOPS}b', buf, offset))
+# ── Metadata parsing ─────────────────────────────────────────────────────────
+
+def parse_metadata(meta_bytes: bytes) -> dict:
+    """
+    Parse the 85-byte metadata block appended after the image payload.
+    Returns only the fields relevant to the number of actual links.
+    """
+    if len(meta_bytes) != META_SIZE:
+        raise ValueError(f"Expected {META_SIZE} meta bytes, got {len(meta_bytes)}")
+
+    off = 0
+    seq_num          = struct.unpack_from("<I", meta_bytes, off)[0]; off += 4
+    timestamp_pt     = struct.unpack_from("<I", meta_bytes, off)[0]; off += 4
+    offset_pt_to_ft  = struct.unpack_from("<i", meta_bytes, off)[0]; off += 4  # signed
+    num_links        = meta_bytes[off];                               off += 1
+
+    devices_visited = []
+    for _ in range(ROUTING_MAX_HOPS):
+        devices_visited.append(struct.unpack_from("<I", meta_bytes, off)[0])
+        off += 4
+
+    per_link_delay = []
+    for _ in range(ROUTING_MAX_HOPS):
+        per_link_delay.append(struct.unpack_from("<i", meta_bytes, off)[0])  # signed
+        off += 4
+
+    per_link_rssi = []
+    for _ in range(ROUTING_MAX_HOPS):
+        per_link_rssi.append(struct.unpack_from("b", meta_bytes, off)[0])    # signed byte
+        off += 1
+
+    # Trim arrays to the number of hops actually used.
+    # devices_visited has num_links + 1 entries (origin + one per hop).
+    n_devices = min(num_links + 1, ROUTING_MAX_HOPS)
     return {
-        'seq_num':         seq_num,
-        'timestamp_pt':    timestamp_pt,
-        'offset_pt_to_ft': offset_pt_to_ft,
-        'num_links':       num_links,
-        'devices_visited': devices_visited[:num_links + 1],
-        'per_link_delay':  per_link_delay[:num_links + 1],
-        'per_link_rssi':   per_link_rssi[:num_links + 1],
+        "seq_num":            seq_num,
+        "timestamp_pt_ms":    timestamp_pt,
+        "offset_pt_to_ft_ms": offset_pt_to_ft,
+        "num_links":          num_links,
+        "devices_visited":    [f"0x{v:08x}" for v in devices_visited[:n_devices]],
+        "per_link_delay_ms":  per_link_delay[:num_links],
+        "per_link_rssi_dbm":  per_link_rssi[:num_links],
     }
 
-def print_log(data: bytes):
-    try:
-        text = data.decode('utf-8', errors='replace')
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped and any(c.isalnum() for c in stripped):
-                print(f"[LOG] {stripped}")
-    except Exception:
-        pass
+# ── Bridge ────────────────────────────────────────────────────────────────────
 
-def receive_images(port, baudrate, mqtt_broker, mqtt_port):
-    mqtt_client = None
-    if mqtt_broker:
-        try:
-            mqtt_client = mqtt.Client(client_id="nRF9151_ImagePublisher")
-            mqtt_client.connect(mqtt_broker, mqtt_port, 60)
-            mqtt_client.loop_start()
-            print(f"Connected to MQTT broker: {mqtt_broker}:{mqtt_port}")
-        except Exception as e:
-            print(f"MQTT connection failed: {e}")
-            mqtt_client = None
+class UartMqttBridge:
+    def __init__(self, port: str, baudrate: int, client: mqtt.Client, topic: str):
+        self.port     = port
+        self.baudrate = baudrate
+        self.client   = client
+        self.topic    = topic
 
-    try:
-        ser = serial.Serial(port, baudrate, timeout=0.5)
-    except serial.SerialException as e:
-        print(f"Error: {e}")
-        print(f"Make sure {port} is not already open.")
-        sys.exit(1)
-
-    print(f"=== nRF9151 Image Receiver ===")
-    print(f"Port: {port}  Baud: {baudrate}")
-    print(f"Header: {HEADER_SIZE} bytes  Metadata: {METADATA_SIZE} bytes  ROUTING_MAX_HOPS: {ROUTING_MAX_HOPS}")
-    print(f"Press Ctrl+C to stop\n")
-
-    image_count = 0
-    buf = b''
-
-    try:
+    def run(self) -> None:
+        """Open the serial port and loop forever, reconnecting on errors."""
         while True:
-            chunk = ser.read(4096)
-            if not chunk:
+            try:
+                with serial.Serial(self.port, self.baudrate, timeout=2) as ser:
+                    log.info("Opened %s at %d baud", self.port, self.baudrate)
+                    self._read_loop(ser)
+            except serial.SerialException as exc:
+                log.error("Serial error: %s — retrying in 5 s", exc)
+                time.sleep(5)
+
+    # ── Internal ────────────────────────────────────────────────────────────
+
+    def _read_loop(self, ser: serial.Serial) -> None:
+        magic_idx = 0
+        while True:
+            raw = ser.read(1)
+            if not raw:
                 continue
-            print(f"[DBG] got {len(chunk)} bytes: {chunk[:20].hex()}")
+            b = raw[0]
+            if b == MAGIC[magic_idx]:
+                magic_idx += 1
+                if magic_idx == len(MAGIC):
+                    magic_idx = 0
+                    self._handle_frame(ser)
+            else:
+                magic_idx = 1 if b == MAGIC[0] else 0
+
+    def _read_exact(self, ser: serial.Serial, n: int) -> bytes:
+        buf = b""
+        while len(buf) < n:
+            chunk = ser.read(n - len(buf))
+            if not chunk:
+                raise IOError(f"Timeout: needed {n} bytes, got {len(buf)}")
             buf += chunk
+        return buf
 
-            while True:
-                magic_pos = buf.find(MAGIC)
+    def _handle_frame(self, ser: serial.Serial) -> None:
+        try:
+            # ── total_length ──────────────────────────────────────────────
+            len_bytes    = self._read_exact(ser, 4)
+            total_length = struct.unpack("<I", len_bytes)[0]
+            if total_length == 0 or total_length > MAX_IMAGE_BYTES:
+                log.warning("Implausible total_length=%d — discarding frame", total_length)
+                return
 
-                if magic_pos == -1:
-                    if len(buf) > 7:
-                        print_log(buf[:-7])
-                        buf = buf[-7:]
-                    break
+            # ── payload ───────────────────────────────────────────────────
+            payload = self._read_exact(ser, total_length)
 
-                if magic_pos > 0:
-                    print_log(buf[:magic_pos])
-                    buf = buf[magic_pos:]
+            # ── metadata ──────────────────────────────────────────────────
+            meta_bytes = self._read_exact(ser, META_SIZE)
 
-                if len(buf) < HEADER_SIZE:
-                    break
+            # ── CRC ───────────────────────────────────────────────────────
+            crc_bytes    = self._read_exact(ser, 2)
+            received_crc = struct.unpack("<H", crc_bytes)[0]
 
-                total_length = struct.unpack_from('<I', buf, 8)[0]
+            # CRC covers: total_length(4) + payload + metadata(85)
+            computed_crc = crc16_modbus(len_bytes + payload + meta_bytes)
+            if computed_crc != received_crc:
+                log.error(
+                    "CRC mismatch: computed=0x%04X received=0x%04X — dropping",
+                    computed_crc, received_crc,
+                )
+                return
 
-                if total_length == 0 or total_length > 1024 * 1024:
-                    print(f"[WARN] Implausible length {total_length}, resyncing")
-                    buf = buf[4:]
-                    continue
+            meta = parse_metadata(meta_bytes)
+            self._publish(payload, meta, total_length)
 
-                frame_total = HEADER_SIZE + total_length + 2
-                if len(buf) < frame_total:
-                    break
+        except (IOError, ValueError) as exc:
+            log.error("Frame error: %s", exc)
 
-                # Metadata sits between total_length and payload
-                meta_start = 12  # after magic(8) + total_length(4)
-                payload    = buf[HEADER_SIZE : HEADER_SIZE + total_length]
-                crc_recv   = struct.unpack_from('<H', buf, HEADER_SIZE + total_length)[0]
+    def _publish(self, image_bytes: bytes, meta: dict, total_length: int) -> None:
+        payload = {
+            **meta,
+            "total_size":      total_length,
+            "received_at_ms":  int(time.time() * 1000),
+            "image_base64":    base64.b64encode(image_bytes).decode(),
+        }
+        result = self.client.publish(self.topic, json.dumps(payload), qos=1)
+        if result.rc != mqtt.MQTT_ERR_SUCCESS:
+            log.error("MQTT publish failed: rc=%d", result.rc)
+        else:
+            log.info(
+                "Published  seq=%d  size=%d B  links=%d  path=%s",
+                meta["seq_num"],
+                total_length,
+                meta["num_links"],
+                " → ".join(meta["devices_visited"]),
+            )
 
-                # CRC covers everything after the magic: total_length + metadata + payload
-                crc_calc = crc16(buf[8 : HEADER_SIZE + total_length])
+# ── Entry point ───────────────────────────────────────────────────────────────
 
-                if crc_recv != crc_calc:
-                    print(f"[WARN] CRC mismatch (recv=0x{crc_recv:04X}, calc=0x{crc_calc:04X})")
-                    buf = buf[4:]
-                    continue
-
-                hdr = parse_metadata(buf, meta_start)
-
-                image_count += 1
-                ts = datetime.now()
-                kb = total_length / 1024
-
-                print(f"\n[IMAGE #{image_count}]  ({kb:.1f} KB, CRC=0x{crc_calc:04X} OK)")
-                print(f"  seq={hdr['seq_num']}  num_links={hdr['num_links']}")
-                print(f"  timestamp_pt={hdr['timestamp_pt']}  offset_pt_to_ft={hdr['offset_pt_to_ft']}")
-                print(f"  devices_visited={[hex(d) for d in hdr['devices_visited']]}")
-                print(f"  per_link_delay={hdr['per_link_delay']}")
-                print(f"  per_link_rssi={hdr['per_link_rssi']} dBm")
-
-                magic_in_payload = payload.count(MAGIC)
-                if magic_in_payload > 0:
-                    print(f"  WARNING: Magic found {magic_in_payload} times in payload!")
-
-                if mqtt_client:
-                    mqtt_data = {
-                        "timestamp":        ts.timestamp(),
-                        "size_bytes":       total_length,
-                        "size_kb":          round(kb, 2),
-                        "crc":              f"0x{crc_calc:04X}",
-                        "image_count":      image_count,
-                        "seq_num":          hdr['seq_num'],
-                        "num_links":        hdr['num_links'],
-                        "timestamp_pt":     hdr['timestamp_pt'],
-                        "offset_pt_to_ft":  hdr['offset_pt_to_ft'],
-                        "devices_visited":  hdr['devices_visited'],
-                        "per_link_delay":   hdr['per_link_delay'],
-                        "per_link_rssi":    hdr['per_link_rssi'],
-                    }
-                    mqtt_client.publish("images/metadata", json.dumps(mqtt_data), qos=1)
-                    mqtt_client.publish("images/data", payload, qos=1)
-                    print(f"  Published to MQTT")
-
-                buf = buf[frame_total:]
-
-    except KeyboardInterrupt:
-        print(f"\nStopped. Received {image_count} images total.")
-        ser.close()
-        if mqtt_client:
-            mqtt_client.loop_stop()
-            mqtt_client.disconnect()
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Receive images from nRF9151 DK and publish via MQTT")
-    parser.add_argument("--port", default="/dev/ttyUSB0",
-                        help="Serial port (default: /dev/ttyUSB0)")
-    parser.add_argument("--baud", type=int, default=1000000,
-                        help="Baud rate (default: 1000000)")
-    parser.add_argument("--mqtt-broker", default="10.225.150.248",
-                        help="MQTT broker address")
-    parser.add_argument("--mqtt-port", type=int, default=1883,
-                        help="MQTT broker port")
+def main() -> None:
+    parser = argparse.ArgumentParser(description="DECT NR+ UART → MQTT bridge")
+    parser.add_argument("--port",      default="/dev/ttyACM0", help="Serial port (default: /dev/ttyACM0)")
+    parser.add_argument("--baud",      type=int, default=115200, help="Baud rate (default: 115200)")
+    parser.add_argument("--broker",    default="localhost",      help="MQTT broker host (default: localhost)")
+    parser.add_argument("--mqtt-port", type=int, default=1883,   help="MQTT broker port (default: 1883)")
+    parser.add_argument("--topic",     default="dect/images",    help="MQTT publish topic (default: dect/images)")
+    parser.add_argument("--client-id", default="dect-uart-bridge", help="MQTT client ID")
+    parser.add_argument("--verbose",   action="store_true",      help="Enable DEBUG logging")
     args = parser.parse_args()
-    receive_images(args.port, args.baud, args.mqtt_broker, args.mqtt_port)
+
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+
+    client = mqtt.Client(client_id=args.client_id)
+    client.on_connect    = lambda c, u, f, rc: log.info("MQTT connected (rc=%d)", rc)
+    client.on_disconnect = lambda c, u, rc:    log.warning("MQTT disconnected (rc=%d)", rc)
+
+    log.info("Connecting to MQTT broker %s:%d", args.broker, args.mqtt_port)
+    client.connect(args.broker, args.mqtt_port, keepalive=60)
+    client.loop_start()
+
+    bridge = UartMqttBridge(args.port, args.baud, client, args.topic)
+    bridge.run()
+
 
 if __name__ == "__main__":
     main()
