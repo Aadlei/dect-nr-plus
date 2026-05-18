@@ -39,7 +39,7 @@ static bool make_peer_addr(struct sockaddr_in6 *addr, uint32_t long_rd_id)
 }
 
 static int recv_sync_from_peer(struct sync_data *out, uint32_t *rx_long_rd_id_out,
-                               uint32_t *timestamp_out)
+                               uint32_t *timestamp_out, struct sockaddr_in6 *src_addr_out)
 {
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
@@ -47,9 +47,7 @@ static int recv_sync_from_peer(struct sync_data *out, uint32_t *rx_long_rd_id_ou
 
     int ret = recvfrom(sync_socket, out, sizeof(*out), 0,
                        (struct sockaddr *)&src_addr, &addr_len);
-    if (ret < 0) {
-        return -errno;
-    }
+    if (ret < 0) return -errno;
 
     *timestamp_out = k_uptime_get_32();
 
@@ -62,6 +60,7 @@ static int recv_sync_from_peer(struct sync_data *out, uint32_t *rx_long_rd_id_ou
     *rx_long_rd_id_out = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
     LOG_INF("SYNC RX: %d bytes from %s (0x%08x)", ret, addr_str, *rx_long_rd_id_out);
 
+    if (src_addr_out) *src_addr_out = src_addr;
     return 0;
 }
 
@@ -154,7 +153,7 @@ int sync_pt_operation(uint32_t parent_long_rd_id, int32_t *offset_out)
         uint32_t rx_long_rd_id;
         uint32_t T3;
 
-        ret = recv_sync_from_peer(&rx, &rx_long_rd_id, &T3);
+        ret = recv_sync_from_peer(&rx, &rx_long_rd_id, &T3, NULL);
         if (ret == -EAGAIN) {
             LOG_WRN("SYNC RX timeout, retrying (%d/%d)", attempt + 1, SYNC_MAX_RX_RETRIES);
             continue;
@@ -186,14 +185,13 @@ int sync_ft_operation(uint32_t child_long_rd_id)
         return -ENOTCONN;
     }
 
-    /* --- Receive T0 from child PT --- */
-    uint32_t T0 = 0;
     for (int attempt = 0; attempt < SYNC_MAX_RX_RETRIES; attempt++) {
         struct sync_data rx;
         uint32_t rx_long_rd_id;
         uint32_t T1;
+        struct sockaddr_in6 reply_addr;
 
-        int ret = recv_sync_from_peer(&rx, &rx_long_rd_id, &T1);
+        int ret = recv_sync_from_peer(&rx, &rx_long_rd_id, &T1, &reply_addr);
         if (ret == -EAGAIN) {
             LOG_WRN("SYNC RX timeout, retrying (%d/%d)", attempt + 1, SYNC_MAX_RX_RETRIES);
             continue;
@@ -208,26 +206,17 @@ int sync_ft_operation(uint32_t child_long_rd_id)
             continue;
         }
 
-        T0 = rx.T[0];
-
-        /* --- Echo T0, T1, T2 back to child PT --- */
-        struct sockaddr_in6 dst_addr = {
-            .sin6_family = AF_INET6,
-            .sin6_port   = htons(SYNC_PORT),
-        };
-        if (!make_peer_addr(&dst_addr, child_long_rd_id)) {
-            return -EINVAL;
-        }
+        reply_addr.sin6_port = htons(SYNC_PORT);
 
         struct sync_data reply = {
             .magic_signature = SYNC_MAGIC_SIGNATURE,
         };
-        reply.T[0] = T0;
+        reply.T[0] = rx.T[0];
         reply.T[1] = T1;
         reply.T[2] = k_uptime_get_32();
 
         ret = sendto(sync_socket, &reply, sizeof(reply), 0,
-                     (struct sockaddr *)&dst_addr, sizeof(dst_addr));
+                     (struct sockaddr *)&reply_addr, sizeof(reply_addr));
         if (ret < 0) {
             LOG_WRN("Failed to send SYNC reply: %d", errno);
             return -errno;

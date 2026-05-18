@@ -303,8 +303,7 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         uint16_t total_packets  = pkt->total_packets;
         uint16_t payload_len    = pkt->payload_len;
         uint32_t total_size     = pkt->total_data_size;
-        uint32_t timestamp_pt   = pkt->timestamp_pt;
-        int32_t offset_pt_to_ft = pkt->offset_pt_to_ft;
+        
         struct hop_delays route_delays = pkt->route_delays;
         memcpy(payload_copy, pkt->payload, payload_len);
         k_fifo_put(&free_chunks, chunk);
@@ -319,8 +318,8 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             next_expected_idx = 0;
 
             last_meta.seq_num         = pkt->seq_num;
-            last_meta.timestamp_pt    = k_uptime_get_32(); 
-            last_meta.offset_pt_to_ft = 0;                 
+            last_meta.timestamp_pt    = pkt->timestamp_pt;
+            last_meta.offset_pt_to_ft = pkt->offset_pt_to_ft;;                 
             last_meta.route_delays    = route_delays;
             uart_stream_begin(total_size);  // no meta here anymore
         }

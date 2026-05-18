@@ -202,6 +202,11 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 
 
 #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+
+static bool pt_modem_resetting = false;
+static void pt_watchdog_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(pt_watchdog_work, pt_watchdog_work_handler);
+
 static bool pt_operational_init_done = false;
 
 static void pt_reconnect_work_handler(struct k_work *work);
@@ -216,6 +221,71 @@ static void pt_reconnect_work_handler(struct k_work *work)
     dect_net_start_scan();
 }
 
+K_THREAD_STACK_DEFINE(pt_sync_stack, 4096);
+static struct k_thread pt_sync_thread;
+static uint32_t pt_sync_parent_id;
+
+static void pt_watchdog_work_handler(struct k_work *work)
+{
+    if (pt_modem_resetting) {
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(5));
+        return;
+    }
+    if (dect_net_get_parent_long_rd_id() != 0) {
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+        return;
+    }
+    LOG_WRN("PT watchdog: not associated, resetting modem");
+    pt_modem_resetting = true;
+    int ret = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
+    if (ret) {
+        LOG_ERR("Deactivate failed: %d, falling back to rescan", ret);
+        pt_modem_resetting = false;
+        dect_net_start_scan();
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(20));
+    }
+}
+
+static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
+{
+    int ret = sync_pt_operation(pt_sync_parent_id, &SYNC_offset_parent);
+    if (ret == -ENOTCONN) {
+        LOG_WRN("PT SYNC: socket not ready, retrying in 1s");
+        k_work_schedule(&pt_post_assoc_work, K_SECONDS(1));
+        return;
+    }
+    if (ret < 0) {
+        LOG_WRN("PT SYNC failed: %d", ret);
+        return;
+    }
+
+    if (pt_operational_init_done) {
+        return;
+    }
+    pt_operational_init_done = true;
+
+    #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    uart_rx_set_frame_callback(main_relay_tx);
+    int init_ret = uart_data_init();
+    if (init_ret) {
+        LOG_ERR("Failed to initialize UART RX: %d", init_ret);
+        return;
+    }
+    #else
+    int init_ret = spi_slave_init();
+    if (init_ret) {
+        LOG_ERR("Failed to initialize SPI slave: %d", init_ret);
+        return;
+    }
+    init_ret = spi_slave_start_thread();
+    if (init_ret) {
+        LOG_ERR("Failed to start SPI slave thread: %d", init_ret);
+        return;
+    }
+    k_work_schedule(&tx_work, K_SECONDS(5));
+    #endif
+}
+
 static void pt_post_assoc_work_handler(struct k_work *work)
 {
     uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
@@ -225,37 +295,12 @@ static void pt_post_assoc_work_handler(struct k_work *work)
         return;
     }
 
-    int ret = sync_pt_operation(parent_long_rd_id, &SYNC_offset_parent);
-    if (ret == -ENOTCONN) {
-		LOG_WRN("PT SYNC: socket not ready, retrying in 1s");
-		k_work_schedule(&pt_post_assoc_work, K_SECONDS(1));
-		return;
-	}
-
-    if (!pt_operational_init_done) {
-        pt_operational_init_done = true;
-
-        #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-        uart_rx_set_frame_callback(main_relay_tx);
-        int init_ret = uart_data_init();
-        if (init_ret) {
-            LOG_ERR("Failed to initialize UART RX: %d", init_ret);
-            return;
-        }
-        #else
-        int init_ret = spi_slave_init();
-        if (init_ret) {
-            LOG_ERR("Failed to initialize SPI slave: %d", init_ret);
-            return;
-        }
-        init_ret = spi_slave_start_thread();
-        if (init_ret) {
-            LOG_ERR("Failed to start SPI slave thread: %d", init_ret);
-            return;
-        }
-        k_work_schedule(&tx_work, K_SECONDS(5));
-        #endif
-    }
+    pt_sync_parent_id = parent_long_rd_id;
+    k_thread_create(&pt_sync_thread, pt_sync_stack,
+                    K_THREAD_STACK_SIZEOF(pt_sync_stack),
+                    pt_sync_thread_fn, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+    k_thread_name_set(&pt_sync_thread, "pt_sync");
 }
 #endif
 
@@ -410,20 +455,22 @@ static void rx_thread(void)
             continue;
         }
 
-        int32_t current_delay     = pkt_recv->route_delays.per_link_delay[route_delays_idx];
+        int32_t current_delay = (route_delays_idx > 0)
+			? (int32_t)pkt_recv->route_delays.per_link_delay[route_delays_idx - 1]
+			: 0;
         uint32_t ft_this_timestamp = k_uptime_get_32();          // T_B
         uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
         int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
-        uint32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
+        int32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
 		// Only print for last packet in sequence
 		if (pkt_recv->packet_idx + 1 == pkt_recv->total_packets)
 		{
-			LOG_INF("current_delay: %u", current_delay);
+			LOG_INF("current_delay: %d", current_delay);
 			LOG_INF("ft_this_timestamp: %u", ft_this_timestamp);
 			LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
 			LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
-			LOG_INF("cumulative_delay: %u", cumulative_delay);
+			LOG_INF("cumulative_delay: %d", cumulative_delay);
 		}	
 
         int8_t rx_rssi = dect_net_get_rx_rssi(&src_addr);
@@ -554,19 +601,21 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 		return;
 	}
 
-	int32_t current_delay = meta->route_delays.per_link_delay[route_delays_idx];
+	int32_t current_delay = (route_delays_idx > 0)
+    ? (int32_t)meta->route_delays.per_link_delay[route_delays_idx - 1]
+    : 0;
 	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
 	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
 	int32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
 	// sibling_ft_offset // O_CB
-	uint32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
+	int32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
 	
-	LOG_INF("current_delay: %u", current_delay);
+	LOG_INF("current_delay: %d", current_delay);
 	LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
 	LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
 	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
 	LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
-	LOG_INF("cumulative_delay: %u", cumulative_delay);
+	LOG_INF("cumulative_delay: %d", cumulative_delay);
 
 	// Update values in struct
 	struct hop_delays delay_information = {
@@ -622,6 +671,9 @@ static void run_as_pt(void)
 {
 	LOG_WRN("Starting as PT");
     dect_net_start_scan();
+	#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+    k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+	#endif
 }
 
 static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
@@ -693,35 +745,40 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 	// Only handle events for our DECT interface
 	if (iface != dect_iface) return;
 	
-	if (event == NET_EVENT_DECT_ACTIVATE_DONE)
-	{
-		const enum dect_status_values *status = cb->info;
-
-		if(*status == DECT_STATUS_OK)
-		{
-			LOG_INF("DECT stack activated successfully");
-			k_sem_give(&sem_activate);
-		}
-		else
-		{
+	if (event == NET_EVENT_DECT_ACTIVATE_DONE) {
+    const enum dect_status_values *status = cb->info;
+    if (*status == DECT_STATUS_OK) {
+        LOG_INF("DECT stack activated successfully");
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        if (pt_modem_resetting) {
+            pt_modem_resetting = false;
+            LOG_WRN("PT modem reset complete, rescanning");
+            dect_net_start_scan();
+            k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+            return;
+        }
+        #endif
+        k_sem_give(&sem_activate);
+		} else {
 			LOG_ERR("DECT stack activation failed: %d", *status);
 		}
-	}
-	else if (event == NET_EVENT_DECT_DEACTIVATE_DONE)
-	{
-		const enum dect_status_values *status = cb->info;
-
-		if(*status == DECT_STATUS_OK)
-		{
-			LOG_INF("DECT stack deactivated successfully");
-			k_sem_give(&sem_activate);
-			
 		}
-		else
-		{
-			LOG_ERR("DECT stack deactivation failed: %d", *status);
+		else if (event == NET_EVENT_DECT_DEACTIVATE_DONE) {
+			const enum dect_status_values *status = cb->info;
+			if (*status == DECT_STATUS_OK) {
+				#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+				if (pt_modem_resetting) {
+					LOG_WRN("PT modem deactivated, reactivating");
+					net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+					return;
+				}
+				#endif
+				LOG_INF("DECT stack deactivated successfully");
+				k_sem_give(&sem_activate);
+			} else {
+				LOG_ERR("DECT stack deactivation failed: %d", *status);
+			}
 		}
-	}
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
