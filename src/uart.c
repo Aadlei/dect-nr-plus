@@ -116,7 +116,7 @@ static void handshake_async_cb(const struct device *dev,
                 LOG_INF("Timestamps:");
                 LOG_INF("  sibling_ft_timestamp: %u", sibling_ft_timestamp);
                 LOG_INF("  current_pt_timestamp: %u", current_pt_timestamp);
-                handshake_rx_offset = (int32_t)sibling_ft_timestamp - (int32_t)current_pt_timestamp; // Offset from the POV of the PT
+                handshake_rx_offset = (int32_t)(sibling_ft_timestamp-current_pt_timestamp); // Offset from the POV of the PT
                 LOG_INF("  handshake_rx_offset: %d", handshake_rx_offset);
                 handshake_received = true;
                 k_sem_give(&hs_rx_sem);

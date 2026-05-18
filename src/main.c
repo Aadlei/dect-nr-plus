@@ -47,13 +47,13 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		500
+#define WORK_RESCHEDULE_TIME_MSEC 		10
 
 
 // Networ interface
@@ -158,6 +158,7 @@ static void check_spi_image_work_handler(struct k_work *work)
 	LOG_INF("Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
 	k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
 } /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+
 #elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
 #endif
@@ -456,12 +457,13 @@ static void rx_thread(void)
         }
 
         int32_t current_delay = (route_delays_idx > 0)
-			? (int32_t)pkt_recv->route_delays.per_link_delay[route_delays_idx - 1]
-			: 0;
+		? (int32_t)pkt_recv->route_delays.per_link_delay[route_delays_idx]
+		: 0;
+		
         uint32_t ft_this_timestamp = k_uptime_get_32();          // T_B
         uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
         int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
-        int32_t cumulative_delay  = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
+        int32_t  cumulative_delay = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
 
 		// Only print for last packet in sequence
 		if (pkt_recv->packet_idx + 1 == pkt_recv->total_packets)
@@ -602,7 +604,7 @@ static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct 
 	}
 
 	int32_t current_delay = (route_delays_idx > 0)
-    ? (int32_t)meta->route_delays.per_link_delay[route_delays_idx - 1]
+    ? (int32_t)meta->route_delays.per_link_delay[route_delays_idx]
     : 0;
 	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
 	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A

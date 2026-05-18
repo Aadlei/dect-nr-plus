@@ -168,13 +168,11 @@ int sync_pt_operation(uint32_t parent_long_rd_id, int32_t *offset_out)
             continue;
         }
 
-        int32_t T0 = (int32_t)pkt.T[0];
-        int32_t T1 = (int32_t)rx.T[1];
-        int32_t T2 = (int32_t)rx.T[2];
-        int32_t T3_local = (int32_t)T3;
-        *offset_out = ((T1 - T0) + (T2 - T3_local)) / 2;
-        LOG_INF("PT-FT clock offset: %d ms", *offset_out);
-        return 0;
+        int32_t d1 = (int32_t)(rx.T[1] - pkt.T[0]);   /* T1 - T0 */
+        int32_t d2 = (int32_t)(T3 - rx.T[2]);          /* T3 - T2 */
+        *offset_out = (d1 - d2) / 2;
+        LOG_INF("PTP: d1=%d d2=%d offset=%d", d1, d2, *offset_out);
+                return 0;
     }
 
     LOG_WRN("SYNC PT: exhausted retries");
