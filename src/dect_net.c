@@ -118,8 +118,8 @@ void dect_net_write_pt_settings(void)
     s.auto_start.activate = false;
 
     s.cmd_params.write_scope_bitmap =
-        DECT_SETTINGS_WRITE_SCOPE_AUTO_START  |
-        DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE |
+        DECT_SETTINGS_WRITE_SCOPE_AUTO_START    |
+        DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE   |
         DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
 
     ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &s, sizeof(s));

@@ -47,13 +47,13 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #elif defined(CONFIG_DECT_RELAY_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #endif
 
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		10
+#define WORK_RESCHEDULE_TIME_MSEC 		2000
 
 
 // Networ interface
@@ -530,19 +530,20 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 
 	uint32_t time_tx = k_uptime_get_32(); // PT edge: Time at the start of TX of all chunks
 
+	struct data_packet *packet = malloc(sizeof(struct data_packet) + MAX_PAYLOAD_SIZE);
+	if (packet == NULL)
+	{
+		LOG_ERR("Memory allocation failed!");
+		return;
+	}
+
+	uint8_t num_retransmits = 10;
+
 	for (uint16_t i = 0; i < total_chunks; i++)
 	{
 		size_t data_offset = i * MAX_PAYLOAD_SIZE;
 		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - data_offset);
 		size_t total_size = sizeof(struct data_packet) + payload_len;
-
-		// Create data packet
-		struct data_packet *packet = malloc(total_size);
-		if (packet == NULL)
-		{
-			LOG_ERR("Memory allocation failed!");
-			return;
-		}
 
 		// Packet detail overhead
 		packet->packet_idx = i;
@@ -562,15 +563,24 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 		ret = sendto(common_socket, packet, total_size, 0,
 			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
 
-		if (ret >= 0) // Success
+		if (ret >= 0) { // Success
 			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-		else
+			num_retransmits = 10;
+		} else {
+			if (num_retransmits-- <= 0)
+			{
+				// Break out of loop if stuck on a packet
+				break;
+			}
 			LOG_ERR("Failed to send image chunk to destination: %d", ret);
-		
-		// Free the packet memory
-		free(packet);
-		k_msleep(50);
+			k_msleep(10);
+			i--;
+			continue;
+		}
 	}
+
+	// Free the packet memory
+	free(packet);
 	
 	LOG_INF("Sent packet to destination");
 
@@ -987,7 +997,6 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
         break;
 	}
 	}
-	
 }
 
 int main(void)
