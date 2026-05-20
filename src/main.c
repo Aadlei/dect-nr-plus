@@ -107,57 +107,69 @@ static void run_as_pt(void);
 
 // TX work
 #if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-static void check_spi_image_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
-static void check_spi_image_work_handler(struct k_work *work)
+
+#define IMAGE_POLL_INTERVAL_MS 20
+
+K_THREAD_STACK_DEFINE(edge_tx_stack, 4096);
+static struct k_thread edge_tx_thread;
+
+static void edge_tx_thread_fn(void *p1, void *p2, void *p3)
 {
-	// First check if dect is connected so device can transmit
-	if (!dect_connected)
-	{
-		LOG_ERR("DECT not connected! Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
-		return;
+	uint16_t image_seq_num = 0;
+
+	while (1) {
+		if (!dect_connected) {
+			k_sleep(K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+			continue;
+		}
+
+		/* No new image: poll. The SPI thread holds its ready pin LOW
+		 * until we consume, so the buffer is stable once the flag is set. */
+		if (!spi_slave_is_new_image_available()) {
+			k_sleep(K_MSEC(IMAGE_POLL_INTERVAL_MS));
+			continue;
+		}
+
+		uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
+		if (parent_long_rd_id == 0) {
+			LOG_WRN("Invalid parent long RD ID, retrying");
+			k_sleep(K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+			continue;
+		}
+
+		const uint8_t *image_data = spi_slave_get_image_buffer();
+		uint32_t image_size = (uint32_t)spi_slave_get_image_size();
+		LOG_INF("New image received: %u bytes", image_size);
+
+		struct hop_delays empty_delay_information = {
+			.num_links = 0,
+			.devices_visited = {0},
+			.per_link_delay = {0},
+		};
+		empty_delay_information.devices_visited[0] = dect_net_get_current_long_rd_id();
+
+		tx_img_data(image_data, image_size, empty_delay_information,
+			    parent_long_rd_id, image_seq_num++);
+
+		spi_slave_clear_image_flag();
+
+		/* No fixed delay. Loop straight back: tx_img_data blocks on L2
+		 * flow control, so the send cadence self-paces to channel capacity. */
 	}
+}
 
-	// No TX if no new image is available
-    if (!spi_slave_is_new_image_available())
-	{
-		LOG_WRN("No new image available. Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
-		return;
-	}
+static void edge_tx_thread_start(void)
+{
+	k_thread_create(&edge_tx_thread, edge_tx_stack,
+			K_THREAD_STACK_SIZEOF(edge_tx_stack),
+			edge_tx_thread_fn, NULL, NULL, NULL,
+			K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+	k_thread_name_set(&edge_tx_thread, "edge_tx");
+}
 
-	const uint8_t *image_data = spi_slave_get_image_buffer();
-	uint32_t image_size = (uint32_t)spi_slave_get_image_size();
-	
-	LOG_INF("New image received: %zu bytes", image_size);
-
-	// Get FT parent long RD ID
-	uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
-	if (parent_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d ms", WORK_RESCHEDULE_TIME_MSEC);
-		k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
-		return;
-	}
-
-	// Transmit over DECT (as edge the delay information is empty)
-	struct hop_delays empty_delay_information = {
-		.num_links = 0,
-		.devices_visited = {0},
-		.per_link_delay = {0},
-	};
-	empty_delay_information.devices_visited[0] = dect_net_get_current_long_rd_id();
-
-	static uint16_t image_seq_num = 0;
-	tx_img_data(image_data, image_size, empty_delay_information, parent_long_rd_id, image_seq_num++);
-
-	spi_slave_clear_image_flag();
-
-	// Reschedule work
-	LOG_INF("Rescheduling work in %d ms...", WORK_RESCHEDULE_TIME_MSEC);
-	k_work_schedule(&tx_work, K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
-} /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
+#endif
 
 #elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
@@ -283,7 +295,7 @@ static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
         LOG_ERR("Failed to start SPI slave thread: %d", init_ret);
         return;
     }
-    k_work_schedule(&tx_work, K_SECONDS(5));
+    edge_tx_thread_start(); // Start the thread that polls for new images and sends them to the FT
     #endif
 }
 
@@ -560,14 +572,24 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 		packet->payload_len = payload_len;
 		memcpy(packet->payload, image_data + data_offset, packet->payload_len);
 
-		ret = sendto(common_socket, packet, total_size, 0,
-			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
+		int retries = 0;
+		do {
+			ret = sendto(common_socket, packet, total_size, 0,
+				     (struct sockaddr *)&dst_addr, sizeof(dst_addr));
+			if (ret < 0 && (errno == ENOMEM || errno == EAGAIN)) {
+				k_sleep(K_MSEC(20));
+				retries++;
+			} else {
+				break;
+			}
+		} while (retries < 10);
 
-		if (ret >= 0) { // Success
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-		} else {
-			LOG_ERR("Failed to send image chunk to destination: %d", ret);
+		if (ret < 0) {
+			LOG_ERR("Chunk %d failed after %d retries (errno %d) - aborting image",
+				i + 1, retries, errno);
+			break;
 		}
+		LOG_INF("Sending chunk %d/%d (%d bytes)", i + 1, total_chunks, ret);
 	}
 
 	// Free the packet memory
