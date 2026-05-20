@@ -27,7 +27,7 @@ struct data_packet {
     uint8_t  payload[];
 } __attribute__((packed));
 
-/* Single source of truth — can never drift from the actual struct layout */
+/* Single source of truth - can never drift from the actual struct layout */
 #define CHUNK_BUF_SIZE  (sizeof(struct data_packet) + MAX_PAYLOAD_SIZE)
 
 struct rx_chunk {

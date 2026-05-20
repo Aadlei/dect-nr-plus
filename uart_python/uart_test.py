@@ -1,7 +1,7 @@
 """
-DECT NR+ Mesh — UART → MQTT Bridge
+DECT NR+ Mesh - UART → MQTT Bridge
 
-Wire format (uart.c — old format, metadata trailer after payload):
+Wire format (uart.c - old format, metadata trailer after payload):
   [MAGIC:8]
   [total_length:4]
   [payload:total_length]
@@ -85,7 +85,7 @@ def receive_images(port: str, baudrate: int, mqtt_broker: str, mqtt_port: int):
             client.loop_start()
             print(f"MQTT: connected to {mqtt_broker}:{mqtt_port}")
         except Exception as e:
-            print(f"MQTT: connection failed — {e}")
+            print(f"MQTT: connection failed - {e}")
             client = None
 
     try:

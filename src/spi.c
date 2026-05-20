@@ -131,7 +131,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
     while (1)
     {
         /* If the previous image has not been consumed yet, keep ready LOW and
-         * wait here. The SPI thread owns the ready pin — it will raise it once
+         * wait here. The SPI thread owns the ready pin - it will raise it once
          * it re-arms spi_transceive. */
         {
             bool pending;
@@ -153,7 +153,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         gpio_pin_set(gpio_dev, READY_PIN, 1);
         ret = spi_transceive(spi_dev, &spi_cfg, &tx_buf_set, &rx_buf_set);
 
-        /* Signal LOW immediately — tells Pi "I'm processing, don't send yet".
+        /* Signal LOW immediately - tells Pi "I'm processing, don't send yet".
          * Pi will wait for this LOW then the next HIGH before sending the
          * following chunk. */
         gpio_pin_set(gpio_dev, READY_PIN, 0);
@@ -224,7 +224,7 @@ void spi_slave_receive_thread(void *p1, void *p2, void *p3)
         else
         {
             prev_last_byte = rx_buffer[bytes_received - 1];
-            /* Loop back immediately — ready will be raised at the top of the
+            /* Loop back immediately - ready will be raised at the top of the
              * next iteration once spi_transceive is about to be called. */
         }
     }

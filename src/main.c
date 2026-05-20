@@ -53,7 +53,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		2000
+#define WORK_RESCHEDULE_TIME_MSEC 		5000
 
 
 // Networ interface
@@ -408,8 +408,6 @@ static void rx_thread(void)
         return;
     }
 
-
-
     while (true)
     {
         if (common_socket < 0)
@@ -537,8 +535,6 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 		return;
 	}
 
-	uint8_t num_retransmits = 10;
-
 	for (uint16_t i = 0; i < total_chunks; i++)
 	{
 		size_t data_offset = i * MAX_PAYLOAD_SIZE;
@@ -565,17 +561,8 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 
 		if (ret >= 0) { // Success
 			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-			num_retransmits = 10;
 		} else {
-			if (num_retransmits-- <= 0)
-			{
-				// Break out of loop if stuck on a packet
-				break;
-			}
 			LOG_ERR("Failed to send image chunk to destination: %d", ret);
-			k_msleep(10);
-			i--;
-			continue;
 		}
 	}
 

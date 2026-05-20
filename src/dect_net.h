@@ -7,7 +7,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 
-/* Device identities — single source of truth for the whole project */
+/* Device identities - single source of truth for the whole project */
 #define DECT_EDGE_PT_LONG_RD_ID     0xAAAAAAAAU
 
 #define DECT_FT_LONG_RD_ID          0xBBBBBBBBU
@@ -39,7 +39,7 @@ const struct in6_addr *dect_net_get_mesh_prefix(void);
 uint32_t             dect_net_get_parent_long_rd_id(void);
 bool                 dect_net_create_ipv6(struct in6_addr *addr, uint32_t long_rd_id);
 
-/* RSSI — update called from NET_EVENT_DECT_NEIGHBOR_INFO handler */
+/* RSSI - update called from NET_EVENT_DECT_NEIGHBOR_INFO handler */
 void   dect_net_update_rssi(uint32_t long_rd_id, int8_t rssi);
 int8_t dect_net_get_rx_rssi(struct sockaddr_in6 *src_addr);
 

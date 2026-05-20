@@ -295,11 +295,32 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
     uint16_t expected_total    = 0;
     uint16_t next_expected_idx = 0;
 
-    while (1) {
-        struct rx_chunk *chunk = k_fifo_get(&pending_chunks, K_FOREVER);
-        struct data_packet *pkt = (struct data_packet *)chunk->data;
+    struct rx_chunk *buf_chunk = malloc(sizeof(struct rx_chunk));
+    bool buf_filled = false;
 
-        uint16_t packet_idx     = pkt->packet_idx;
+    while (1) {
+        struct rx_chunk *chunk = NULL;
+        
+        if (buf_filled) {
+            chunk = buf_chunk;
+            buf_filled = false;
+        } else {
+            chunk = k_fifo_get(&pending_chunks, K_FOREVER);
+        }
+        struct data_packet *pkt = (struct data_packet *)chunk->data;
+        uint16_t packet_idx = pkt->packet_idx;
+
+        if (packet_idx != next_expected_idx) {
+            LOG_WRN("Chunk gap in queue: Expected chunk %u, got %u. Attempting to fix order...", next_expected_idx, packet_idx);
+
+            *buf_chunk = *chunk;
+            buf_filled = true;
+
+            chunk = k_fifo_get(&pending_chunks, K_FOREVER);
+            pkt = (struct data_packet *)chunk->data;
+            packet_idx = pkt->packet_idx;
+        }
+
         uint16_t total_packets  = pkt->total_packets;
         uint16_t payload_len    = pkt->payload_len;
         uint32_t total_size     = pkt->total_data_size;
@@ -311,7 +332,7 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         if (packet_idx == 0) {
             if (stream_active) {
                 LOG_WRN("Aborting stale stream, new image starting");
-                // can't call stream_end here without a meta — just reset
+                // can't call stream_end here without a meta - just reset
                 stream_active = false;
             }
             expected_total    = total_packets;
@@ -324,15 +345,6 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
         }
         last_meta.route_delays    = route_delays;
 
-        if (packet_idx != next_expected_idx) {
-            LOG_ERR("Gap: expected chunk %u, got %u — dropping image",
-                    next_expected_idx, packet_idx);
-            stream_active = false;
-            expected_total    = 0;
-            next_expected_idx = 0;
-            continue;
-        }
-
         uart_stream_chunk(payload_copy, payload_len);
         next_expected_idx++;
 
@@ -342,6 +354,9 @@ static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
             next_expected_idx = 0;
         }
     }
+
+    // Never reached, but for good measure
+    free(buf_chunk);
 }
 
 

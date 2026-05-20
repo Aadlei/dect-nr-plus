@@ -221,7 +221,7 @@ void dect_net_update_rssi(uint32_t long_rd_id, int8_t rssi)
             return;
         }
     }
-    /* Cache full — overwrite slot 0 */
+    /* Cache full - overwrite slot 0 */
     rssi_cache[0].long_rd_id = long_rd_id;
     rssi_cache[0].rssi       = rssi;
 }
