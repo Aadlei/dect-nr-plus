@@ -35,6 +35,8 @@ static bool uart_ready;
 static struct rx_chunk chunk_pool[CHUNK_POOL_COUNT];
 static struct k_fifo free_chunks;
 static struct k_fifo pending_chunks;
+static uint16_t expected_total;
+static uint16_t next_expected_idx;
 static struct packet_metadata last_meta;
 static uint32_t last_total_size;
 
@@ -288,75 +290,96 @@ struct rx_chunk *uart_get_free_chunk(void) { return k_fifo_get(&free_chunks, K_F
 void uart_return_free_chunk(struct rx_chunk *c) { k_fifo_put(&free_chunks, c); }
 void uart_queue_chunk(struct rx_chunk *c) { k_fifo_put(&pending_chunks, c); }
 
-static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
+// Send one in-order chunk to the UART stream
+static void process_chunk(struct rx_chunk *chunk)
 {
     static uint8_t payload_copy[MAX_PAYLOAD_SIZE];
-    static struct packet_metadata last_meta;  // ADD THIS
-    uint16_t expected_total    = 0;
-    uint16_t next_expected_idx = 0;
+    static struct packet_metadata last_meta;
 
-    struct rx_chunk *buf_chunk = malloc(sizeof(struct rx_chunk));
-    bool buf_filled = false;
+    struct data_packet *pkt = (struct data_packet *)chunk->data;
+
+    if (pkt->packet_idx == 0) {
+        expected_total            = pkt->total_packets;
+        next_expected_idx         = 0;
+        last_meta.seq_num         = pkt->seq_num;
+        last_meta.timestamp_pt    = pkt->timestamp_pt;
+        last_meta.offset_pt_to_ft = pkt->offset_pt_to_ft;
+        uart_stream_begin(pkt->total_data_size);
+    }
+    last_meta.route_delays = pkt->route_delays;
+
+    memcpy(payload_copy, pkt->payload, pkt->payload_len);
+    uint16_t payload_len = pkt->payload_len;
+    k_fifo_put(&free_chunks, chunk);
+
+    uart_stream_chunk(payload_copy, payload_len);
+    next_expected_idx++;
+
+    if (next_expected_idx >= expected_total && expected_total > 0) {
+        uart_stream_end(&last_meta);
+        expected_total    = 0;
+        next_expected_idx = 0;
+    }
+}
+
+// Abandon stream when chunks are lost on the link
+static void abort_stream(void)
+{
+    stream_active     = false;   // truncated; bridge resyncs on next MAGIC
+    expected_total    = 0;
+    next_expected_idx = 0;
+}
+
+static void uart_tx_thread_fn(void *p1, void *p2, void *p3)
+{
+    struct rx_chunk *held = NULL;
+    expected_total = 0;
+    next_expected_idx = 0;
 
     while (1) {
-        struct rx_chunk *chunk = NULL;
+        struct rx_chunk *chunk = k_fifo_get(&pending_chunks, K_FOREVER);
+        uint16_t idx = ((struct data_packet *)chunk->data)->packet_idx;
         
-        if (buf_filled) {
-            chunk = buf_chunk;
-            buf_filled = false;
-        } else {
-            chunk = k_fifo_get(&pending_chunks, K_FOREVER);
-        }
-        struct data_packet *pkt = (struct data_packet *)chunk->data;
-        uint16_t packet_idx = pkt->packet_idx;
+        // Process the in-order chunk. Also process the held if in order
+        if (idx == next_expected_idx) {
+            process_chunk(chunk);
 
-        if (packet_idx != next_expected_idx) {
-            LOG_WRN("Chunk gap in queue: Expected chunk %u, got %u. Attempting to fix order...", next_expected_idx, packet_idx);
-
-            *buf_chunk = *chunk;
-            buf_filled = true;
-
-            chunk = k_fifo_get(&pending_chunks, K_FOREVER);
-            pkt = (struct data_packet *)chunk->data;
-            packet_idx = pkt->packet_idx;
-        }
-
-        uint16_t total_packets  = pkt->total_packets;
-        uint16_t payload_len    = pkt->payload_len;
-        uint32_t total_size     = pkt->total_data_size;
-
-        struct hop_delays route_delays = pkt->route_delays;
-        memcpy(payload_copy, pkt->payload, payload_len);
-        k_fifo_put(&free_chunks, chunk);
-
-        if (packet_idx == 0) {
-            if (stream_active) {
-                LOG_WRN("Aborting stale stream, new image starting");
-                // can't call stream_end here without a meta - just reset
-                stream_active = false;
+            if (held && ((struct data_packet *)held->data)->packet_idx == next_expected_idx) {
+                process_chunk(held);
+                held = NULL;
             }
-            expected_total    = total_packets;
-            next_expected_idx = 0;
-
-            last_meta.seq_num         = pkt->seq_num;
-            last_meta.timestamp_pt    = pkt->timestamp_pt;
-            last_meta.offset_pt_to_ft = pkt->offset_pt_to_ft;;                 
-            uart_stream_begin(total_size);  // no meta here anymore
+            continue;
         }
-        last_meta.route_delays    = route_delays;
 
-        uart_stream_chunk(payload_copy, payload_len);
-        next_expected_idx++;
+        // New image. Abort current stream.
+        if (idx == 0) {
+            LOG_WRN("Incomplete image (%u/%u chunks), resyncing", next_expected_idx, expected_total);
+            abort_stream();
 
-        if (next_expected_idx >= expected_total && expected_total > 0) {
-            uart_stream_end(&last_meta);
-            expected_total    = 0;
-            next_expected_idx = 0;
+            if (held) {
+                k_fifo_put(&free_chunks, held);
+                held = NULL;
+            }
+            process_chunk(chunk);
+            continue;
         }
+
+        // Chunks out-of-order. Hold the chunk.
+        if (held == NULL && expected_total != 0 && idx == next_expected_idx + 1) {
+            held = chunk;
+            continue;
+        }
+
+        // Rest is chunk loss. Abort current stream.
+        LOG_WRN("Lost chunk (expected %u, got %u), aborting image", next_expected_idx, idx);
+        abort_stream();
+      
+        if (held) {
+            k_fifo_put(&free_chunks, held);
+            held = NULL;
+        }
+        k_fifo_put(&free_chunks, chunk);
     }
-
-    // Never reached, but for good measure
-    free(buf_chunk);
 }
 
 

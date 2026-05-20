@@ -53,7 +53,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		5000
+#define WORK_RESCHEDULE_TIME_MSEC 		500
 
 
 // Networ interface
@@ -420,8 +420,12 @@ static void rx_thread(void)
         ret = recvfrom(common_socket, pkt_recv, CHUNK_BUF_SIZE, 0,
             (struct sockaddr *)&src_addr, &addr_len);
 
-        if (ret < 0)
-        {
+        if (ret < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				// Do not sleep
+				continue;
+			}
+
             LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
             k_sleep(K_SECONDS(1));
             continue;
@@ -434,7 +438,7 @@ static void rx_thread(void)
         }
 
         LOG_INF("Chunk %d/%d (%d bytes)",
-            pkt_recv->packet_idx + 1, pkt_recv->total_packets, pkt_recv->payload_len);
+            pkt_recv->packet_idx + 1, pkt_recv->total_packets, sizeof(struct data_packet) + pkt_recv->payload_len);
 
         #if IS_ENABLED(CONFIG_DECT_RELAY_FT)
         {
