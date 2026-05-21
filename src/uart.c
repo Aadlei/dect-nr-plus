@@ -405,8 +405,9 @@ int uart_tx_thread_start(void)
 
 #ifdef CONFIG_DECT_RELAY_PT
 
+static K_SEM_DEFINE(rx_payload_free_sem, 1, 1);
 #define UART_RX_BUF_SIZE     4096
-#define UART_RX_BUF_COUNT    2
+#define UART_RX_BUF_COUNT    4
 #define UART_RX_TIMEOUT_US   1000
 #define UART_RX_MAX_PAYLOAD  (1024 * 16)
 #define UART_RING_BUF_SIZE   8192
@@ -461,7 +462,7 @@ struct rx_frame_work_t {
     struct k_work work;
     uint32_t payload_len;
     struct packet_metadata meta;
-    uint8_t payload[UART_RX_MAX_PAYLOAD];
+    uint8_t *payload;
 };
 static struct rx_frame_work_t rx_frame_work;
 
@@ -470,6 +471,15 @@ static K_WORK_DELAYABLE_DEFINE(uart_rx_reenable_work, uart_rx_reenable_work_fn);
 
 static void uart_rx_reenable_work_fn(struct k_work *work)
 {
+    if (rx_state != WAIT_MAGIC_0) {
+        /* a frame was in progress; release the payload buffer it held */
+        if (rx_state == READ_PAYLOAD || rx_state == READ_META || rx_state == READ_CRC)
+            k_sem_give(&rx_payload_free_sem);
+        rx_state = WAIT_MAGIC_0;
+        rx_header_idx = 0;
+        rx_payload_received = 0;
+    }
+    
     rx_buf_idx = 0;   /* keep buffer ping-pong consistent with uart_rx_start */
     int ret = uart_rx_enable(uart_dev, rx_bufs[0], UART_RX_BUF_SIZE, UART_RX_TIMEOUT_US);
     if (ret) {
@@ -543,6 +553,7 @@ static void process_byte(uint8_t b)
                 break;
             }
 
+            k_sem_take(&rx_payload_free_sem, K_FOREVER);
             rx_running_crc = crc16_update_rx(0xFFFF, rx_header, 4);
             rx_payload_received = 0;
             rx_payload_buf = rx_payload_storage;
@@ -635,11 +646,12 @@ static void process_byte(uint8_t b)
                 }
  
                 rx_frame_work.payload_len = rx_payload_len;
-                memcpy(rx_frame_work.payload, rx_payload_buf, rx_payload_len);
+                rx_frame_work.payload = rx_payload_buf;
                 k_work_submit(&rx_frame_work.work);
             } else {
                 LOG_ERR("CRC mismatch: got 0x%04X expected 0x%04X",
                         received_crc, rx_running_crc);
+                k_sem_give(&rx_payload_free_sem);
             }
             rx_state = WAIT_MAGIC_0;
         }
@@ -727,6 +739,10 @@ int uart_rx_start(void)
 void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb)
 {
     rx_frame_cb = cb;
+}
+void uart_rx_release_payload(void)
+{
+    k_sem_give(&rx_payload_free_sem);
 }
 
 #endif /* CONFIG_DECT_RELAY_PT */

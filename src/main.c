@@ -168,8 +168,18 @@ static void edge_tx_thread_start(void)
 }
 
 #endif
+
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
+
+/* Relay TX thread — stack and thread object defined here so pt_sync_thread_fn
+ * (which starts the thread) can see them. The thread function body and the
+ * msgq are defined later in the CONFIG_DECT_RELAY_PT block. */
+#define RELAY_TX_STACK_SIZE 4096
+#define RELAY_TX_PRIORITY   7
+K_THREAD_STACK_DEFINE(relay_tx_stack, RELAY_TX_STACK_SIZE);
+static struct k_thread relay_tx_thread_data;
+static void relay_tx_thread_fn(void *p1, void *p2, void *p3);
 #endif
 
 #if !IS_ENABLED(CONFIG_DECT_RELAY_PT)
@@ -267,6 +277,13 @@ static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
 
     #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
     uart_rx_set_frame_callback(main_relay_tx);
+
+    k_thread_create(&relay_tx_thread_data, relay_tx_stack,
+                    K_THREAD_STACK_SIZEOF(relay_tx_stack),
+                    relay_tx_thread_fn, NULL, NULL, NULL,
+                    RELAY_TX_PRIORITY, 0, K_NO_WAIT);
+    k_thread_name_set(&relay_tx_thread_data, "relay_tx");
+
     int init_ret = uart_data_init();
     if (init_ret) {
         LOG_ERR("Failed to initialize UART RX: %d", init_ret);
@@ -594,57 +611,128 @@ static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct h
 
 
 #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static void main_relay_tx(const uint8_t *data, uint32_t data_size, const struct packet_metadata *meta)
+
+/* ── Relay TX: decouple UART RX (work queue) from DECT TX (dedicated thread) ──
+ *
+ * main_relay_tx() runs in the system work queue context. It MUST NOT block,
+ * because the DECT modem stack uses the same work queue to process ACKs that
+ * free DLC TX buffers. Blocking here starves ACK processing and causes the
+ * NRF_ENOMEM / "Too much unacked TX data" feedback loop.
+ *
+ * So main_relay_tx() only enqueues the frame and returns immediately.
+ * relay_tx_thread_fn() does the actual blocking DECT transmission.
+ *
+ * The payload buffer (rx_payload_storage, inside uart.c) is protected by a
+ * semaphore. We hold that buffer for the lifetime of one relay job and release
+ * it via uart_rx_release_payload() only after tx_img_data() completes. This
+ * makes UART RX naturally back-pressure: while DECT TX is slow, the parser
+ * cannot re-arm, the Relay FT's UART feed stalls, and the FT's own DECT RX
+ * flow-controls the upstream hop. The whole chain throttles cleanly.
+ */
+
+struct relay_tx_job {
+    const uint8_t          *data;       /* points into uart.c rx_payload_storage */
+    uint32_t                data_size;
+    struct packet_metadata  meta;
+};
+
+/* Single-slot queue: only one relay job can be in flight, because there is
+ * only one payload buffer. main_relay_tx() will block briefly on a full queue,
+ * but that block is bounded and is itself useful back-pressure. */
+K_MSGQ_DEFINE(relay_tx_msgq, sizeof(struct relay_tx_job), 1, 4);
+
+static void relay_tx_thread_fn(void *p1, void *p2, void *p3)
 {
-    uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
-    if (parent_long_rd_id == 0) {
-        LOG_ERR("No parent RD ID, dropping relayed image");
-        return;
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+    struct relay_tx_job job;
+
+    while (1) {
+        k_msgq_get(&relay_tx_msgq, &job, K_FOREVER);
+
+        uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
+        if (parent_long_rd_id == 0) {
+            LOG_ERR("No parent RD ID, dropping relayed image");
+            uart_rx_release_payload();   /* must always release */
+            continue;
+        }
+
+        /* ── Cumulative delay calculation (moved verbatim from old main_relay_tx) ── */
+        uint8_t route_delays_idx = job.meta.route_delays.num_links;
+
+        if (route_delays_idx >= ROUTING_MAX_HOPS) {
+            LOG_ERR("route_delays_idx %d out of bounds (max %d), dropping frame",
+                    route_delays_idx, ROUTING_MAX_HOPS);
+            uart_rx_release_payload();
+            continue;
+        }
+
+        int32_t current_delay = (route_delays_idx > 0)
+            ? (int32_t)job.meta.route_delays.per_link_delay[route_delays_idx]
+            : 0;
+        uint32_t pt_this_timestamp = k_uptime_get_32();      /* T_C_2 */
+        uint32_t pt_prev_timestamp = job.meta.timestamp_pt;  /* T_A   */
+        int32_t  offset_pt_to_ft   = job.meta.offset_pt_to_ft; /* O_AB */
+        int32_t  cumulative_delay  = current_delay +
+            (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
+
+        LOG_INF("current_delay: %d", current_delay);
+        LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
+        LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+        LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
+        LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
+        LOG_INF("cumulative_delay: %d", cumulative_delay);
+
+        struct hop_delays delay_information = {
+            .num_links = (uint8_t)(route_delays_idx + 1),
+        };
+        for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+            delay_information.per_link_delay[i]  = job.meta.route_delays.per_link_delay[i];
+            delay_information.devices_visited[i] = job.meta.route_delays.devices_visited[i];
+            delay_information.per_link_rssi[i]   = job.meta.route_delays.per_link_rssi[i];
+        }
+        route_delays_idx++;
+        delay_information.per_link_delay[route_delays_idx]  = cumulative_delay;
+        delay_information.devices_visited[route_delays_idx] = dect_net_get_current_long_rd_id();
+
+        LOG_INF("Relaying image (%u bytes) to parent 0x%08x",
+                job.data_size, parent_long_rd_id);
+
+        /* Blocking DECT TX — safe here, this is a dedicated thread, not the
+         * work queue. tx_img_data() may sleep in its ENOMEM retry loop; that
+         * no longer starves the modem's ACK processing. */
+        tx_img_data(job.data, job.data_size, delay_information,
+                    parent_long_rd_id, job.meta.seq_num);
+
+        /* Done with the payload buffer — let uart.c re-arm the parser. */
+        uart_rx_release_payload();
     }
-
-	// Calculate cumulative delay
-	uint8_t route_delays_idx = meta->route_delays.num_links;
-
-	if (route_delays_idx >= ROUTING_MAX_HOPS) {
-		LOG_ERR("route_delays_idx %d out of bounds (max %d), dropping frame",
-				route_delays_idx, ROUTING_MAX_HOPS);
-		return;
-	}
-
-	int32_t current_delay = (route_delays_idx > 0)
-    ? (int32_t)meta->route_delays.per_link_delay[route_delays_idx]
-    : 0;
-	uint32_t pt_this_timestamp = k_uptime_get_32(); // T_C_2
-	uint32_t pt_prev_timestamp = meta->timestamp_pt; // T_A
-	int32_t offset_pt_to_ft = meta->offset_pt_to_ft; // O_AB
-	// sibling_ft_offset // O_CB
-	int32_t cumulative_delay = current_delay + (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
-	
-	LOG_INF("current_delay: %d", current_delay);
-	LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
-	LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
-	LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
-	LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
-	LOG_INF("cumulative_delay: %d", cumulative_delay);
-
-	// Update values in struct
-	struct hop_delays delay_information = {
-		.num_links = ++route_delays_idx,
-	};
-	
-	for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
-		delay_information.per_link_delay[i]  = meta->route_delays.per_link_delay[i];
-		delay_information.devices_visited[i] = meta->route_delays.devices_visited[i];
-		delay_information.per_link_rssi[i]   = meta->route_delays.per_link_rssi[i]; // add this
-	}
-	
-	delay_information.per_link_delay[route_delays_idx] = cumulative_delay;
-	delay_information.devices_visited[route_delays_idx] = dect_net_get_current_long_rd_id();
-
-    LOG_INF("Relaying image (%zu bytes) to parent 0x%08x", data_size, parent_long_rd_id);
-	tx_img_data(data, data_size, delay_information, parent_long_rd_id, meta->seq_num);
 }
-#endif
+
+/* Runs in system work queue context (called from uart.c rx_frame_work_handler).
+ * MUST NOT block on anything slow. Just enqueue and return. */
+static void main_relay_tx(const uint8_t *data, uint32_t data_size,
+                          const struct packet_metadata *meta)
+{
+    struct relay_tx_job job = {
+        .data      = data,
+        .data_size = data_size,
+    };
+    job.meta = *meta;
+
+    /* Queue depth is 1 and the payload buffer is held until the TX thread
+     * releases it, so this should normally succeed immediately. A brief block
+     * here only happens if a previous job is still transmitting — which is
+     * correct back-pressure. Bounded wait so the work queue is never stuck
+     * indefinitely. */
+    int ret = k_msgq_put(&relay_tx_msgq, &job, K_MSEC(100));
+    if (ret) {
+        LOG_ERR("Relay TX queue full, dropping image");
+        uart_rx_release_payload();   /* nobody else will release it */
+    }
+}
+
+#endif /* CONFIG_DECT_RELAY_PT */
 
 static void run_as_ft(void)
 {

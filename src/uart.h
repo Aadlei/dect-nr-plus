@@ -62,5 +62,5 @@ void uart_rx_set_frame_callback(uart_rx_frame_cb_t cb);
 int uart_handshake_init(void);
 int uart_handshake_send_id_timestamp(uint32_t long_rd_id);
 int uart_handshake_receive_id_timestamp(uint32_t *long_rd_id, int32_t *offset, int timeout_sec);
-
+void uart_rx_release_payload(void);
 #endif
