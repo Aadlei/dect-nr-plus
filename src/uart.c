@@ -442,7 +442,7 @@ typedef enum {
     READ_META,   /* 85 bytes → metadata, stored in rx_header[4..88]   */
     READ_CRC,
 } rx_state_t;
-
+static void uart_rx_reenable_work_fn(struct k_work *work);
 static uart_rx_frame_cb_t rx_frame_cb;
 static rx_state_t rx_state = WAIT_MAGIC_0;
 static uint8_t    rx_header[STREAM_HEADER_SIZE - 8];
@@ -464,6 +464,19 @@ struct rx_frame_work_t {
     uint8_t payload[UART_RX_MAX_PAYLOAD];
 };
 static struct rx_frame_work_t rx_frame_work;
+
+#define UART_RX_REENABLE_BACKOFF_MS 20
+static K_WORK_DELAYABLE_DEFINE(uart_rx_reenable_work, uart_rx_reenable_work_fn);
+
+static void uart_rx_reenable_work_fn(struct k_work *work)
+{
+    rx_buf_idx = 0;   /* keep buffer ping-pong consistent with uart_rx_start */
+    int ret = uart_rx_enable(uart_dev, rx_bufs[0], UART_RX_BUF_SIZE, UART_RX_TIMEOUT_US);
+    if (ret) {
+        LOG_ERR("RX re-enable failed: %d, retrying", ret);
+        k_work_reschedule(&uart_rx_reenable_work, K_MSEC(UART_RX_REENABLE_BACKOFF_MS));
+    }
+}
 
 static void rx_frame_work_handler(struct k_work *work)
 {
@@ -669,8 +682,8 @@ static void uart_async_cb(const struct device *dev,
         break;
 
     case UART_RX_DISABLED:
-        LOG_WRN("UART RX disabled, re-enabling");
-        uart_rx_enable(dev, rx_bufs[0], UART_RX_BUF_SIZE, UART_RX_TIMEOUT_US);
+        LOG_WRN("UART RX disabled, re-enabling after backoff");
+        k_work_reschedule(&uart_rx_reenable_work, K_MSEC(UART_RX_REENABLE_BACKOFF_MS));
         break;
 
     case UART_RX_STOPPED:

@@ -44,10 +44,10 @@ LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
 #if defined(CONFIG_DECT_RELAY_FT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
-#elif defined(CONFIG_DECT_RELAY_PT)
+#elif defined(CONFIG_DECT_RELAY_PT) || defined(CONFIG_DECT_EDGE_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
-const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
+const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
 #define COMMON_PORT 					12345
@@ -106,9 +106,9 @@ static void run_as_ft(void);
 static void run_as_pt(void);
 
 // TX work
-#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
 
-#define IMAGE_POLL_INTERVAL_MS 20
+#if IS_ENABLED(CONFIG_DECT_EDGE_PT)
+#define IMAGE_POLL_INTERVAL_MS 400
 
 K_THREAD_STACK_DEFINE(edge_tx_stack, 4096);
 static struct k_thread edge_tx_thread;
@@ -167,11 +167,8 @@ static void edge_tx_thread_start(void)
 	k_thread_name_set(&edge_tx_thread, "edge_tx");
 }
 
-#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
-static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
 #endif
-
-#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
 #endif
 
@@ -214,30 +211,23 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 }
 
 
-#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-
+#if !IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_EDGE_PT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
 static bool pt_modem_resetting = false;
 static void pt_watchdog_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(pt_watchdog_work, pt_watchdog_work_handler);
-
 static bool pt_operational_init_done = false;
-
 static void pt_reconnect_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(pt_reconnect_work, pt_reconnect_work_handler);
-
 static void pt_post_assoc_work_handler(struct k_work *work);
 static K_WORK_DELAYABLE_DEFINE(pt_post_assoc_work, pt_post_assoc_work_handler);
-
 static void pt_reconnect_work_handler(struct k_work *work)
 {
     LOG_INF("PT: re-scanning for parent...");
     dect_net_start_scan();
 }
-
 K_THREAD_STACK_DEFINE(pt_sync_stack, 4096);
 static struct k_thread pt_sync_thread;
 static uint32_t pt_sync_parent_id;
-
 static void pt_watchdog_work_handler(struct k_work *work)
 {
     if (pt_modem_resetting) {
@@ -258,7 +248,6 @@ static void pt_watchdog_work_handler(struct k_work *work)
         k_work_schedule(&pt_watchdog_work, K_SECONDS(20));
     }
 }
-
 static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
 {
     int ret = sync_pt_operation(pt_sync_parent_id, &SYNC_offset_parent);
@@ -271,7 +260,6 @@ static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
         LOG_WRN("PT SYNC failed: %d", ret);
         return;
     }
-
     if (pt_operational_init_done) {
         return;
     }
@@ -284,7 +272,7 @@ static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
         LOG_ERR("Failed to initialize UART RX: %d", init_ret);
         return;
     }
-    #else
+    #elif IS_ENABLED(CONFIG_DECT_EDGE_PT)          /* <-- was #else */
     int init_ret = spi_slave_init();
     if (init_ret) {
         LOG_ERR("Failed to initialize SPI slave: %d", init_ret);
@@ -298,7 +286,6 @@ static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
     edge_tx_thread_start(); // Start the thread that polls for new images and sends them to the FT
     #endif
 }
-
 static void pt_post_assoc_work_handler(struct k_work *work)
 {
     uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
@@ -307,7 +294,6 @@ static void pt_post_assoc_work_handler(struct k_work *work)
         k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
         return;
     }
-
     pt_sync_parent_id = parent_long_rd_id;
     k_thread_create(&pt_sync_thread, pt_sync_stack,
                     K_THREAD_STACK_SIZEOF(pt_sync_stack),
@@ -316,7 +302,6 @@ static void pt_post_assoc_work_handler(struct k_work *work)
     k_thread_name_set(&pt_sync_thread, "pt_sync");
 }
 #endif
-
 // Function declarations
 #if defined(CONFIG_DK_LIBRARY)
 static void button_handler(uint32_t button_states, uint32_t has_changed)
@@ -409,11 +394,11 @@ static void main_mac_print_network_info(struct net_if *iface)
 static void rx_thread(void)
 {
     int ret;
-
+	static uint8_t rx_buf[CHUNK_BUF_SIZE] __aligned(4);
+	struct data_packet *pkt_recv = (struct data_packet *)rx_buf;
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
-    struct data_packet *pkt_recv = malloc(CHUNK_BUF_SIZE);
     if (!pkt_recv)
     {
         LOG_ERR("Failed to allocate memory for RX buffer");
@@ -752,10 +737,6 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		// Close sockets
 		close_common_socket();
 		sync_close_socket();
-
-		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		k_work_cancel_delayable(&tx_work);
-		#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn off LED 1 to indicate disconnection 
