@@ -53,7 +53,7 @@ const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define WORK_RESCHEDULE_TIME_MSEC 		500
+#define WORK_RESCHEDULE_TIME_MSEC 		100
 
 
 // Networ interface
@@ -108,7 +108,7 @@ static void run_as_pt(void);
 // TX work
 
 #if IS_ENABLED(CONFIG_DECT_EDGE_PT)
-#define IMAGE_POLL_INTERVAL_MS 400
+#define IMAGE_POLL_INTERVAL_MS 1000
 
 K_THREAD_STACK_DEFINE(edge_tx_stack, 4096);
 static struct k_thread edge_tx_thread;
@@ -245,7 +245,7 @@ static void pt_watchdog_work_handler(struct k_work *work)
         return;
     }
     if (dect_net_get_parent_long_rd_id() != 0) {
-        k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(60));
         return;
     }
     LOG_WRN("PT watchdog: not associated, resetting modem");
