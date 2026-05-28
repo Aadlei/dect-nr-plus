@@ -32,6 +32,12 @@ config DECT_RELAY_FT
 	help
 	  Enable DECT NR+ Relay FT functionality. If enabled, the device will act as a relay for DECT NR+ messages.
 
+config DECT_EDGE_PT
+	bool "DECT NR+ PT Edge"
+	default n
+	help
+	  Enable DECT NR+ Edge PT functionality.
+
 config SPI
 	depends on !DECT_RELAY_PT && !DECT_RELAY_FT
 

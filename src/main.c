@@ -34,65 +34,50 @@
 #include <net/dect/dect_net_l2.h>
 #include <net/dect/dect_utils.h>
 
+/* Headers */
 #include "spi.h"
 #include "uart.h"
+#include "sync.h"
+#include "dect_net.h"
 
 LOG_MODULE_REGISTER(main, CONFIG_HELLO_DECT_MAC_LOG_LEVEL);
 
-struct SYNC_data
-{
-	uint32_t magic_signature;
-	uint32_t T[4];
-};
-
-// CHANGE THIS BASED ON DEVICE TYPE
 #if defined(CONFIG_DECT_RELAY_FT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
-#elif defined(CONFIG_DECT_RELAY_PT)
+#elif defined(CONFIG_DECT_RELAY_PT) || defined(CONFIG_DECT_EDGE_PT)
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_PT;
 #else
 const static dect_device_type_t current_device_type = DECT_DEVICE_TYPE_FT;
 #endif
 
-#define DECT_EDGE_PT_LONG_RD_ID  	0xAABBCCDDU // PT edge
-#define DECT_FT_LONG_RD_ID 			0x12345678U // Change this for each FT
-#define DECT_SINK_LONG_RD_ID 		0x67214200U
-#define DECT_PT_LONG_RD_ID			0x11223344U // Change this for each PT
-
-#define SYNC_MAGIC_SIGNATURE			0xFEFDU	// The G.O.A.T
-#define SOCKET_COMMON_PORT 				12345
-#define MESH_PREFIX_STR 				"fd12:3456:789a"
+#define COMMON_PORT 					12345
 #define NW_SCAN_RETRY_MS 				2000
 #define SOCKET_RX_TIMEOUT_SEC 			5
-#define SYNC_TIMEOUT					5000
-#define WORK_RESCHEDULE_TIME_SEC 		10
+#define WORK_RESCHEDULE_TIME_MSEC 		100
 
-static struct in6_addr mesh_prefix;
 
 // Networ interface
 static struct net_if *dect_iface;
 
 // Sockets
-static int tx_socket = -1;
-static int rx_socket = -1;
+static int common_socket = -1;
 
 // Application state
 static bool nw_beacon_started = false; // TODO: Fix this to more robust solution
-static uint32_t best_long_rd_id = 0;
-static uint8_t best_route_cost = 0xFF;
 static bool dect_connected;
 uint32_t message_counter;
-uint32_t current_long_rd_id;
 static int32_t SYNC_offset_parent;	// The offset time (negative means the FT clock is behind)
-static uint32_t SYNC_network_delay_parent;
+static uint32_t sibling_ft_long_rd_id = 0; // For FT relay and PT relay to avoid associating between these two
+static uint32_t pending_sync_child_id = 0;
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static int32_t sibling_ft_offset = 0; // For FT relay and PT relay to calculate clock offset over UART
+#endif
 
 // Semaphores for controlling flow
-K_SEM_DEFINE(sem_if_up, 0, 1);
 K_SEM_DEFINE(sem_activate, 0, 1);
-K_SEM_DEFINE(sem_deactivate, 0, 1);
 K_SEM_DEFINE(sem_network_created, 0, 1); // For FT
-K_SEM_DEFINE(sem_network_joined, 0, 1); // For PT
 K_SEM_DEFINE(sem_association_created, 0, 1);
+
 // Network management callback 
 static struct net_mgmt_event_callback net_conn_mgr_cb;
 static struct net_mgmt_event_callback net_if_cb;
@@ -107,84 +92,114 @@ static void button_handler(uint32_t button_states, uint32_t has_changed);
 static void main_mac_print_network_info(struct net_if *iface);
 
 // Sockets
-static int open_sockets(void);
-static void close_sockets(void);
+static int open_common_socket(void);
+static void close_common_socket(void);
 
-// SYNC
-static int SYNC_pt_operation(void);
-static int SYNC_ft_operation(void);
 
 // TX and RX threads
 static void rx_thread(void);
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id);
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id, uint16_t seq_num);
 
-// Helper functions
-static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id);
-static uint32_t get_parent_long_rd_id(void);
-static uint32_t get_first_child_long_rd_id();
-
-// IPv6 creation for device
-static void create_and_set_device_ipv6(void);
-
-// Write device settings
-static void write_ft_settings(void);
-static void write_pt_settings(void);
-
-// DECT NR+ operations
-static void start_nw_beacon(void);
-static void start_network_scan(void);
-static void join_network(uint32_t long_rd_id);
 
 // Main thread operations
 static void run_as_ft(void);
 static void run_as_pt(void);
 
 // TX work
-#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-static void check_spi_image_work_handler(struct k_work *work);
-static K_WORK_DELAYABLE_DEFINE(tx_work, check_spi_image_work_handler);
-static void check_spi_image_work_handler(struct k_work *work)
+
+#if IS_ENABLED(CONFIG_DECT_EDGE_PT)
+#define IMAGE_POLL_INTERVAL_MS 1000
+
+K_THREAD_STACK_DEFINE(edge_tx_stack, 4096);
+static struct k_thread edge_tx_thread;
+
+static void edge_tx_thread_fn(void *p1, void *p2, void *p3)
 {
-	// First check if dect is connected so device can transmit
-	if (!dect_connected)
-	{
-		LOG_ERR("DECT not connected! Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
-		return;
+	uint16_t image_seq_num = 0;
+
+	while (1) {
+		if (!dect_connected) {
+			k_sleep(K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+			continue;
+		}
+
+		/* No new image: poll. The SPI thread holds its ready pin LOW
+		 * until we consume, so the buffer is stable once the flag is set. */
+		if (!spi_slave_is_new_image_available()) {
+			k_sleep(K_MSEC(IMAGE_POLL_INTERVAL_MS));
+			continue;
+		}
+
+		uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
+		if (parent_long_rd_id == 0) {
+			LOG_WRN("Invalid parent long RD ID, retrying");
+			k_sleep(K_MSEC(WORK_RESCHEDULE_TIME_MSEC));
+			continue;
+		}
+
+		const uint8_t *image_data = spi_slave_get_image_buffer();
+		uint32_t image_size = (uint32_t)spi_slave_get_image_size();
+		LOG_INF("New image received: %u bytes", image_size);
+
+		struct hop_delays empty_delay_information = {
+			.num_links = 0,
+			.devices_visited = {0},
+			.per_link_delay = {0},
+		};
+		empty_delay_information.devices_visited[0] = dect_net_get_current_long_rd_id();
+
+		tx_img_data(image_data, image_size, empty_delay_information,
+			    parent_long_rd_id, image_seq_num++);
+
+		spi_slave_clear_image_flag();
+
+		/* No fixed delay. Loop straight back: tx_img_data blocks on L2
+		 * flow control, so the send cadence self-paces to channel capacity. */
 	}
-
-	// No tx if no new image is available
-    if (!spi_slave_is_new_image_available())
-	{
-		LOG_WRN("No new image available. Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
-		return;
-	}
-
-	const uint8_t *image_data = spi_slave_get_image_buffer();
-	size_t image_size = spi_slave_get_image_size();
-	
-	LOG_INF("New image received: %zu bytes", image_size);
-
-	// Get FT parent long RD ID
-	uint32_t parent_long_rd_id = get_parent_long_rd_id();
-	if (parent_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid parent long RD ID. Rescheduling work in %d seconds", WORK_RESCHEDULE_TIME_SEC);
-		k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
-		return;
-	}
-
-	// Transmit over DECT
-	tx_img_data(image_data, image_size, parent_long_rd_id);
-
-	spi_slave_clear_image_flag();
-
-	// Reschedule work
-	LOG_INF("Rescheduling work in %d seconds...", WORK_RESCHEDULE_TIME_SEC);
-	k_work_schedule(&tx_work, K_SECONDS(WORK_RESCHEDULE_TIME_SEC));
 }
-#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+
+static void edge_tx_thread_start(void)
+{
+	k_thread_create(&edge_tx_thread, edge_tx_stack,
+			K_THREAD_STACK_SIZEOF(edge_tx_stack),
+			edge_tx_thread_fn, NULL, NULL, NULL,
+			K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+	k_thread_name_set(&edge_tx_thread, "edge_tx");
+}
+
+#endif
+
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static void main_relay_tx(const uint8_t *data, uint32_t len, const struct packet_metadata *meta);
+
+/* Relay TX thread — stack and thread object defined here so pt_sync_thread_fn
+ * (which starts the thread) can see them. The thread function body and the
+ * msgq are defined later in the CONFIG_DECT_RELAY_PT block. */
+#define RELAY_TX_STACK_SIZE 4096
+#define RELAY_TX_PRIORITY   7
+K_THREAD_STACK_DEFINE(relay_tx_stack, RELAY_TX_STACK_SIZE);
+static struct k_thread relay_tx_thread_data;
+static void relay_tx_thread_fn(void *p1, void *p2, void *p3);
+#endif
+
+#if !IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static void ft_sync_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(ft_sync_work, ft_sync_work_handler);
+
+static void ft_sync_work_handler(struct k_work *work)
+{
+    LOG_INF("FT: running SYNC with child 0x%08x", pending_sync_child_id);
+    int ret = sync_ft_operation(pending_sync_child_id);
+    if (ret == -ENOTCONN) {
+		LOG_WRN("FT SYNC: socket not ready, retrying in 1s");
+		k_work_schedule(&ft_sync_work, K_SECONDS(1));
+		return;
+	}
+    if (ret < 0) {
+        LOG_WRN("FT SYNC failed (child may have disconnected)");
+    }
+}
+#endif
 
 // LED 2 turn-off work
 #if defined(CONFIG_DK_LIBRARY)
@@ -205,6 +220,105 @@ void nrf_modem_fault_handler(struct nrf_modem_fault_info *fault_info)
 	__ASSERT(false, "Modem crash detected, halting application");
 }
 
+
+#if !IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_EDGE_PT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
+static bool pt_modem_resetting = false;
+static void pt_watchdog_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(pt_watchdog_work, pt_watchdog_work_handler);
+static bool pt_operational_init_done = false;
+static void pt_reconnect_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(pt_reconnect_work, pt_reconnect_work_handler);
+static void pt_post_assoc_work_handler(struct k_work *work);
+static K_WORK_DELAYABLE_DEFINE(pt_post_assoc_work, pt_post_assoc_work_handler);
+static void pt_reconnect_work_handler(struct k_work *work)
+{
+    LOG_INF("PT: re-scanning for parent...");
+    dect_net_start_scan();
+}
+K_THREAD_STACK_DEFINE(pt_sync_stack, 4096);
+static struct k_thread pt_sync_thread;
+static uint32_t pt_sync_parent_id;
+static void pt_watchdog_work_handler(struct k_work *work)
+{
+    if (pt_modem_resetting) {
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(5));
+        return;
+    }
+    if (dect_net_get_parent_long_rd_id() != 0) {
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(60));
+        return;
+    }
+    LOG_WRN("PT watchdog: not associated, resetting modem");
+    pt_modem_resetting = true;
+    int ret = net_mgmt(NET_REQUEST_DECT_DEACTIVATE, dect_iface, NULL, 0);
+    if (ret) {
+        LOG_ERR("Deactivate failed: %d, falling back to rescan", ret);
+        pt_modem_resetting = false;
+        dect_net_start_scan();
+        k_work_schedule(&pt_watchdog_work, K_SECONDS(20));
+    }
+}
+static void pt_sync_thread_fn(void *p1, void *p2, void *p3)
+{
+    int ret = sync_pt_operation(pt_sync_parent_id, &SYNC_offset_parent);
+    if (ret == -ENOTCONN) {
+        LOG_WRN("PT SYNC: socket not ready, retrying in 1s");
+        k_work_schedule(&pt_post_assoc_work, K_SECONDS(1));
+        return;
+    }
+    if (ret < 0) {
+        LOG_WRN("PT SYNC failed: %d", ret);
+        return;
+    }
+    if (pt_operational_init_done) {
+        return;
+    }
+    pt_operational_init_done = true;
+
+    #if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    uart_rx_set_frame_callback(main_relay_tx);
+
+    k_thread_create(&relay_tx_thread_data, relay_tx_stack,
+                    K_THREAD_STACK_SIZEOF(relay_tx_stack),
+                    relay_tx_thread_fn, NULL, NULL, NULL,
+                    RELAY_TX_PRIORITY, 0, K_NO_WAIT);
+    k_thread_name_set(&relay_tx_thread_data, "relay_tx");
+
+    int init_ret = uart_data_init();
+    if (init_ret) {
+        LOG_ERR("Failed to initialize UART RX: %d", init_ret);
+        return;
+    }
+    #elif IS_ENABLED(CONFIG_DECT_EDGE_PT)          /* <-- was #else */
+    int init_ret = spi_slave_init();
+    if (init_ret) {
+        LOG_ERR("Failed to initialize SPI slave: %d", init_ret);
+        return;
+    }
+    init_ret = spi_slave_start_thread();
+    if (init_ret) {
+        LOG_ERR("Failed to start SPI slave thread: %d", init_ret);
+        return;
+    }
+    edge_tx_thread_start(); // Start the thread that polls for new images and sends them to the FT
+    #endif
+}
+static void pt_post_assoc_work_handler(struct k_work *work)
+{
+    uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
+    if (parent_long_rd_id == 0) {
+        LOG_WRN("PT post-assoc: no parent yet, retrying");
+        k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
+        return;
+    }
+    pt_sync_parent_id = parent_long_rd_id;
+    k_thread_create(&pt_sync_thread, pt_sync_stack,
+                    K_THREAD_STACK_SIZEOF(pt_sync_stack),
+                    pt_sync_thread_fn, NULL, NULL, NULL,
+                    K_PRIO_PREEMPT(7), 0, K_NO_WAIT);
+    k_thread_name_set(&pt_sync_thread, "pt_sync");
+}
+#endif
 // Function declarations
 #if defined(CONFIG_DK_LIBRARY)
 static void button_handler(uint32_t button_states, uint32_t has_changed)
@@ -233,14 +347,13 @@ static void button_handler(uint32_t button_states, uint32_t has_changed)
 }
 #endif
 
-static int open_sockets(void)
+static int open_common_socket()
 {
-	// RX SOCKET
-	rx_socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (rx_socket < 0)
+	common_socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+	if (common_socket < 0)
 	{
-		LOG_ERR("Failed to create RX socket: %d", errno);
-		rx_socket = -1;
+		LOG_ERR("Failed to create common socket: %d", errno);
+		common_socket = -1;
 		return -errno;
 	}
 
@@ -253,53 +366,39 @@ static int open_sockets(void)
 	int dect_iface_idx = net_if_get_by_iface(dect_iface);
 	int reuse = 1;
 
-	setsockopt(rx_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
-	setsockopt(rx_socket, SOL_SOCKET, SO_BINDTODEVICE, &dect_iface_idx, sizeof(dect_iface_idx));
-	setsockopt(rx_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+	setsockopt(common_socket, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)); // Set timeout
+	setsockopt(common_socket, SOL_SOCKET, SO_BINDTODEVICE, &dect_iface_idx, sizeof(dect_iface_idx)); // Bind to DECT interface
+	setsockopt(common_socket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));	// Reuse same socket if connection is restarted
 
 	struct sockaddr_in6 rx_addr = {
 		.sin6_family = AF_INET6,
-		.sin6_port = htons(SOCKET_COMMON_PORT),
+		.sin6_port = htons(COMMON_PORT),
 		.sin6_addr = in6addr_any
 	};
 
-	int ret = bind(rx_socket, (struct sockaddr *)&rx_addr, sizeof(rx_addr));
+	int ret = bind(common_socket, (struct sockaddr *)&rx_addr, sizeof(rx_addr));
 	if (ret < 0)
 	{
-		LOG_ERR("Failed to bind RX socket: %d", errno);
-		close(rx_socket);
-		rx_socket = -1;
+		LOG_ERR("Failed to bind common socket: %d", errno);
+		close(common_socket);
+		common_socket = -1;
 		return -errno;
 	}
 
-	// TX SOCKET
-	tx_socket = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
-	if (tx_socket < 0)
-	{
-		LOG_ERR("Failed to create TX socket: %d", errno);
-		tx_socket = -1;
-		return -errno;
-	}
+	LOG_INF("Successfully opened common socket");
 
-	LOG_INF("Successfully opened TX and RX sockets");
 	return 0;
 }
 
-static void close_sockets(void)
+static void close_common_socket(void)
 {
-	if (rx_socket >= 0)
+	if (common_socket >= 0)
 	{
-		close(rx_socket);
-		rx_socket = -1;
+		close(common_socket);
+		common_socket = -1;
 	}
 
-	if (tx_socket >= 0)
-	{
-		close(tx_socket);
-		tx_socket = -1;
-	}
-
-	LOG_INF("Succesfully closed TX and RX sockets");
+	LOG_INF("Succesfully closed commonTX and RX sockets");
 }
 
 static void main_mac_print_network_info(struct net_if *iface)
@@ -308,277 +407,117 @@ static void main_mac_print_network_info(struct net_if *iface)
 	LOG_INF("Interface: %s", net_if_get_device(iface)->name);
 }
 
-static int SYNC_pt_operation(void)
-{
-	int ret;
-
-	struct SYNC_data SYNC_timestamps = {0};
-
-	uint32_t parent_long_rd_id = get_parent_long_rd_id();
-	if (parent_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid long RD ID for parent");
-		return -1;
-	}
-
-	struct sockaddr_in6 dst_addr =
-	{
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SOCKET_COMMON_PORT)
-	};
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, parent_long_rd_id);
-	if(!ok)
-	{
-		LOG_WRN("Failed to create IPv6 address");
-		return -1;
-	}
-
-	// Timestamp and TX
-	if (tx_socket < 0)
-	{
-		LOG_WRN("TX socket not open");
-		return -1;
-	}
-
-	SYNC_timestamps.magic_signature = SYNC_MAGIC_SIGNATURE;
-	SYNC_timestamps.T[0] = k_uptime_get_32();
-	ret = sendto(tx_socket, &SYNC_timestamps, sizeof(SYNC_timestamps), 0,
-				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-	if (ret < 0)
-	{
-		LOG_WRN("Failed to send SYNC packet: %d", errno);
-		return -1;
-	}
-	else LOG_INF("SYNC packet sent");
-
-	// Wait for interface to go up and RX socket open
-	LOG_INF("Waiting for RX socket to open...");
-	k_sem_take(&sem_if_up, K_MSEC(SYNC_TIMEOUT * 3));
-
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len = sizeof(src_addr);
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	uint32_t timer_start = k_uptime_get_32();
-
-	while (1)
-	{
-		if (k_uptime_get_32() > timer_start + SYNC_TIMEOUT)
-		{
-			LOG_WRN("SYNC timeout");
-			return -1;
-		}
-
-		if (rx_socket < 0)
-		{
-			LOG_WRN("RX socket not open");
-			return -1;
-		}
-
-		struct SYNC_data rx_from_parent;
-
-		// Timestamp and RX
-		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(rx_socket, &rx_from_parent, sizeof(rx_from_parent), 0,
-				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp_after = k_uptime_get_32();
-
-		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
-
-		// Check if packet is correct
-		if (rx_from_parent.magic_signature ^ SYNC_MAGIC_SIGNATURE)
-		{
-			LOG_WRN("Packet signature not matching for SYNC packet");
-			return -1;
-		}
-
-		if (ret < 0)
-		{
-			LOG_WRN("RX failed: %d", errno);
-			return -1;
-		}
-
-		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Received %d bytes from %s", ret, addr_str);
-
-		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-		if (rx_long_rd_id == parent_long_rd_id)
-		{
-			LOG_INF("RX packet long RD ID matching. Exiting RX...");
-
-			SYNC_timestamps.T[1] = rx_from_parent.T[1];
-			SYNC_timestamps.T[2] = rx_from_parent.T[2];
-			SYNC_timestamps.T[3] = T_temp;
-			break;
-		}
-		else
-		{
-			LOG_WRN("Long RD ID not matching");
-			return -1;
-		}
-	}
-
-	// Calculate total offset
-	SYNC_offset_parent = ((int32_t)(SYNC_timestamps.T[1] - SYNC_timestamps.T[0]) + (int32_t)(SYNC_timestamps.T[2] - SYNC_timestamps.T[3])) / 2;
-	SYNC_network_delay_parent = (SYNC_timestamps.T[3] - SYNC_timestamps.T[0]) - (SYNC_timestamps.T[2] - SYNC_timestamps.T[1]);
-
-	LOG_INF("PT-FT clock offset: %d", SYNC_offset_parent);
-
-	return 0;
-}
-
-static int SYNC_ft_operation(void)
-{
-	int ret;
-
-	struct SYNC_data SYNC_timestamps = {0};
-
-	uint32_t child_long_rd_id = get_first_child_long_rd_id();
-	if (child_long_rd_id == 0)
-	{
-		LOG_WRN("Invalid long RD ID for child");
-		return -1;
-	}
-
-	struct sockaddr_in6 src_addr;
-	socklen_t addr_len = sizeof(src_addr);
-	char addr_str[NET_IPV6_ADDR_LEN];
-
-	while (1)
-	{
-		if (rx_socket < 0)
-		{
-			LOG_WRN("RX socket not open");
-			return -1;
-		}
-
-		struct SYNC_data rx_from_child;
-
-		// Timestamp and RX
-		uint32_t T_temp_before = k_uptime_get_32();
-		ret = recvfrom(rx_socket, &rx_from_child, sizeof(rx_from_child), 0,
-				(struct sockaddr *)&src_addr, &addr_len);
-		uint32_t T_temp_after = k_uptime_get_32();
-		uint32_t T_temp = (T_temp_before + T_temp_after) / 2;
-
-		// Check if packet is correct
-		if (rx_from_child.magic_signature ^ SYNC_MAGIC_SIGNATURE)
-		{
-			LOG_WRN("Packet signature not matching for SYNC packet");
-			return -1;
-		}
-
-		if (ret < 0)
-		{
-			LOG_WRN("RX failed: %d", errno);
-			return -1;
-		}
-
-		net_addr_ntop(AF_INET6, &src_addr.sin6_addr, addr_str, sizeof(addr_str));
-		LOG_INF("Received %d bytes from %s", ret, addr_str);
-
-		uint32_t rx_long_rd_id = dect_utils_lib_long_rd_id_from_ipv6_addr(&src_addr.sin6_addr);
-
-		if (rx_long_rd_id == child_long_rd_id)
-		{
-			LOG_INF("RX packet long RD ID matching. Exiting RX...");
-
-			SYNC_timestamps.T[0] = rx_from_child.T[0];
-			SYNC_timestamps.T[1] = T_temp;
-			break;
-		}
-		else
-		{
-			LOG_WRN("Long RD ID not matching");
-			return -1;
-		}
-	}
-
-	struct sockaddr_in6 dst_addr =
-	{
-		.sin6_family = AF_INET6,
-		.sin6_port = htons(SOCKET_COMMON_PORT)
-	};
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, child_long_rd_id);
-	if(!ok)
-	{
-		LOG_ERR("Failed to create IPv6 address");
-		return -1;
-	}
-
-	// Timestamp and TX
-	if (tx_socket < 0)
-	{
-		LOG_WRN("TX socket not open");
-		return -1;
-	}
-
-	struct SYNC_data SYNC_tx_packet = SYNC_timestamps;
-
-	SYNC_tx_packet.magic_signature = SYNC_MAGIC_SIGNATURE;
-	SYNC_tx_packet.T[2] = k_uptime_get_32();	// Slight inaccurate, because cant timestamp after TX
-	ret = sendto(tx_socket, &SYNC_tx_packet, sizeof(SYNC_tx_packet), 0,
-				(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-	if (ret < 0)
-	{
-		LOG_WRN("Failed to send SYNC packet: %d", errno);
-		return -1;
-	}
-	else LOG_INF("SYNC packet sent");
-
-	return 0;
-}
 
 static void rx_thread(void)
 {
     int ret;
-
+	static uint8_t rx_buf[CHUNK_BUF_SIZE] __aligned(4);
+	struct data_packet *pkt_recv = (struct data_packet *)rx_buf;
     struct sockaddr_in6 src_addr;
     socklen_t addr_len = sizeof(src_addr);
 
+    if (!pkt_recv)
+    {
+        LOG_ERR("Failed to allocate memory for RX buffer");
+        return;
+    }
+
     while (true)
-	{
-		if (rx_socket < 0)
-		{
-			LOG_WRN("RX socket not open. Sleeping for 1 second...");
-			k_sleep(K_SECONDS(1));
-			continue;
-		}
+    {
+        if (common_socket < 0)
+        {
+            LOG_WRN("Common socket not open. Sleeping for 1 second...");
+            k_sleep(K_SECONDS(1));
+            continue;
+        }
 
-        struct rx_chunk *chunk = uart_get_free_chunk();
+        ret = recvfrom(common_socket, pkt_recv, CHUNK_BUF_SIZE, 0,
+            (struct sockaddr *)&src_addr, &addr_len);
 
-		// Rx
-        ret = recvfrom(rx_socket, chunk->data, CHUNK_BUF_SIZE, 0,
-                   (struct sockaddr *)&src_addr, &addr_len);
+        if (ret < 0) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				// Do not sleep
+				continue;
+			}
 
-        if (ret < 0)
-		{
-            uart_return_free_chunk(chunk);
-            LOG_WRN("RX receive failed: %d", errno);
+            LOG_WRN("RX receive failed: %d. Sleeping for 1 second...", errno);
             k_sleep(K_SECONDS(1));
             continue;
         }
 
         if (ret < (int)sizeof(struct data_packet))
-		{
-            uart_return_free_chunk(chunk);
+        {
             LOG_WRN("Packet too small: %d bytes", ret);
             continue;
         }
 
-        struct data_packet *pkt = (struct data_packet *)chunk->data;
         LOG_INF("Chunk %d/%d (%d bytes)",
-            pkt->packet_idx + 1, pkt->total_packets, pkt->payload_len);
+            pkt_recv->packet_idx + 1, pkt_recv->total_packets, sizeof(struct data_packet) + pkt_recv->payload_len);
 
+        #if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        {
+            uint8_t rssi_idx = pkt_recv->route_delays.num_links + 1;
+			if (rssi_idx < ROUTING_MAX_HOPS) {
+				pkt_recv->route_delays.per_link_rssi[rssi_idx] = dect_net_get_rx_rssi(&src_addr);
+			}
+					}
+        #endif
+
+        /* Sink FT: stamp delay and RSSI for the final incoming hop. */
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        uint8_t route_delays_idx = pkt_recv->route_delays.num_links;
+
+        if (route_delays_idx >= ROUTING_MAX_HOPS - 1) {
+            LOG_ERR("route_delays_idx %d out of bounds, dropping chunk", route_delays_idx);
+            continue;
+        }
+
+        int32_t current_delay = (route_delays_idx > 0)
+		? (int32_t)pkt_recv->route_delays.per_link_delay[route_delays_idx]
+		: 0;
+		
+        uint32_t ft_this_timestamp = k_uptime_get_32();          // T_B
+        uint32_t pt_prev_timestamp = pkt_recv->timestamp_pt;     // T_A
+        int32_t  offset_pt_to_ft   = pkt_recv->offset_pt_to_ft; // O_AB
+        int32_t  cumulative_delay = current_delay + (ft_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft));
+
+		// Only print for last packet in sequence
+		if (pkt_recv->packet_idx + 1 == pkt_recv->total_packets)
+		{
+			LOG_INF("current_delay: %d", current_delay);
+			LOG_INF("ft_this_timestamp: %u", ft_this_timestamp);
+			LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+			LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
+			LOG_INF("cumulative_delay: %d", cumulative_delay);
+		}	
+
+        int8_t rx_rssi = dect_net_get_rx_rssi(&src_addr);
+
+        struct hop_delays delay_information = {
+            .num_links = ++route_delays_idx,
+        };
+
+        for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+            delay_information.per_link_delay[i]  = pkt_recv->route_delays.per_link_delay[i];
+            delay_information.devices_visited[i] = pkt_recv->route_delays.devices_visited[i];
+            delay_information.per_link_rssi[i]   = pkt_recv->route_delays.per_link_rssi[i];
+        }
+        delay_information.per_link_delay[route_delays_idx]  = cumulative_delay;
+        delay_information.devices_visited[route_delays_idx] = dect_net_get_current_long_rd_id();
+        delay_information.per_link_rssi[route_delays_idx]   = rx_rssi; 
+
+        pkt_recv->route_delays = delay_information;
+        #endif
+
+        struct rx_chunk *chunk = uart_get_free_chunk();
+        memcpy(chunk->data, pkt_recv, ret);
         chunk->data_len = ret;
         uart_queue_chunk(chunk);
     }
-}
 
-static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t dst_long_rd_id)
+    free(pkt_recv);
+}
+static void tx_img_data(const uint8_t *image_data, uint32_t image_size, struct hop_delays delay_information, uint32_t dst_long_rd_id, uint16_t seq_num)
 {
 	int ret = -1;
 
@@ -586,10 +525,10 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 	struct sockaddr_in6 dst_addr =
 	{
 		.sin6_family = AF_INET6,
-		.sin6_port = htons(SOCKET_COMMON_PORT),
+		.sin6_port = htons(COMMON_PORT),
 	};
 
-	bool ok = create_ipv6_from_long_rd_id(&dst_addr.sin6_addr, dst_long_rd_id);
+	bool ok = dect_net_create_ipv6(&dst_addr.sin6_addr, dst_long_rd_id);
 	if(!ok)
 	{
 		LOG_ERR("Failed to create IPv6 address. Aborting transmission");
@@ -597,45 +536,66 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 	}
 
 	// Send chunks to destination
-	uint16_t total_chunks = image_size / MAX_PAYLOAD_SIZE + 1;
+	uint16_t total_chunks = (image_size + MAX_PAYLOAD_SIZE - 1) / MAX_PAYLOAD_SIZE;
 
-	if (tx_socket < 0)
+	if (common_socket < 0)
 	{
-		LOG_WRN("TX socket not open. Aborting transmission");
+		LOG_WRN("Common socket not open. Aborting transmission");
 		return;
 	}
 
-	for (uint16_t i=0; i < total_chunks; i++)
+	uint32_t time_tx = k_uptime_get_32(); // PT edge: Time at the start of TX of all chunks
+
+	struct data_packet *packet = malloc(sizeof(struct data_packet) + MAX_PAYLOAD_SIZE);
+	if (packet == NULL)
 	{
-		size_t offset = i * MAX_PAYLOAD_SIZE;
-		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - offset);
+		LOG_ERR("Memory allocation failed!");
+		return;
+	}
+
+	for (uint16_t i = 0; i < total_chunks; i++)
+	{
+		size_t data_offset = i * MAX_PAYLOAD_SIZE;
+		size_t payload_len = MIN(MAX_PAYLOAD_SIZE, image_size - data_offset);
 		size_t total_size = sizeof(struct data_packet) + payload_len;
 
-		struct data_packet *packet = malloc(total_size);
-		if (packet == NULL)
-		{
-			LOG_ERR("Memory allocation failed!");
-			return;
-		}
-
+		// Packet detail overhead
 		packet->packet_idx = i;
-		packet->total_data_size = image_size;
 		packet->total_packets = total_chunks;
-		packet->payload_len = payload_len;
-
-		memcpy(packet->payload, image_data + offset, packet->payload_len);
-
-		ret = sendto(tx_socket, packet, total_size, 0,
-			(struct sockaddr *)&dst_addr, sizeof(dst_addr));
-
-		if (ret >= 0) // Success
-			LOG_INF("Sending chunk %d/%d (%d bytes)", i+1, total_chunks, ret);
-		else
-			LOG_ERR("Failed to send image chunk to destination: %d", ret);
+		packet->total_data_size = image_size;
+		packet->seq_num = seq_num;
 		
-		// Free the packet memory
-		free(packet);
+		// Time/delays related
+		packet->timestamp_pt = time_tx;
+		packet->offset_pt_to_ft = SYNC_offset_parent;
+		packet->route_delays = delay_information;
+	
+		// Payload
+		packet->payload_len = payload_len;
+		memcpy(packet->payload, image_data + data_offset, packet->payload_len);
+
+		int retries = 0;
+		do {
+			ret = sendto(common_socket, packet, total_size, 0,
+				     (struct sockaddr *)&dst_addr, sizeof(dst_addr));
+			if (ret < 0 && (errno == ENOMEM || errno == EAGAIN)) {
+				k_sleep(K_MSEC(20));
+				retries++;
+			} else {
+				break;
+			}
+		} while (retries < 10);
+
+		if (ret < 0) {
+			LOG_ERR("Chunk %d failed after %d retries (errno %d) - aborting image",
+				i + 1, retries, errno);
+			break;
+		}
+		LOG_INF("Sending chunk %d/%d (%d bytes)", i + 1, total_chunks, ret);
 	}
+
+	// Free the packet memory
+	free(packet);
 	
 	LOG_INF("Sent packet to destination");
 
@@ -649,245 +609,130 @@ static void tx_img_data(const uint8_t *image_data, size_t image_size, uint32_t d
 #endif
 }
 
-static bool create_ipv6_from_long_rd_id(struct in6_addr *address, uint32_t long_rd_id)
-{
-	// 64-bit prefix + 32-bit sink long rd id + 32-bit long rd id of device (same as sink)
-	bool create_ok = dect_utils_lib_net_ipv6_addr_create_from_sink_and_long_rd_id(
-		mesh_prefix,
-		DECT_SINK_LONG_RD_ID,
-		long_rd_id,
-		address
-	);
-	if(!create_ok)
-	{
-		LOG_ERR("Faied to create IPv6 address");
-	}
 
-	return create_ok;
+#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
+
+/* ── Relay TX: decouple UART RX (work queue) from DECT TX (dedicated thread) ──
+ *
+ * main_relay_tx() runs in the system work queue context. It MUST NOT block,
+ * because the DECT modem stack uses the same work queue to process ACKs that
+ * free DLC TX buffers. Blocking here starves ACK processing and causes the
+ * NRF_ENOMEM / "Too much unacked TX data" feedback loop.
+ *
+ * So main_relay_tx() only enqueues the frame and returns immediately.
+ * relay_tx_thread_fn() does the actual blocking DECT transmission.
+ *
+ * The payload buffer (rx_payload_storage, inside uart.c) is protected by a
+ * semaphore. We hold that buffer for the lifetime of one relay job and release
+ * it via uart_rx_release_payload() only after tx_img_data() completes. This
+ * makes UART RX naturally back-pressure: while DECT TX is slow, the parser
+ * cannot re-arm, the Relay FT's UART feed stalls, and the FT's own DECT RX
+ * flow-controls the upstream hop. The whole chain throttles cleanly.
+ */
+
+struct relay_tx_job {
+    const uint8_t          *data;       /* points into uart.c rx_payload_storage */
+    uint32_t                data_size;
+    struct packet_metadata  meta;
+};
+
+/* Single-slot queue: only one relay job can be in flight, because there is
+ * only one payload buffer. main_relay_tx() will block briefly on a full queue,
+ * but that block is bounded and is itself useful back-pressure. */
+K_MSGQ_DEFINE(relay_tx_msgq, sizeof(struct relay_tx_job), 1, 4);
+
+static void relay_tx_thread_fn(void *p1, void *p2, void *p3)
+{
+    ARG_UNUSED(p1); ARG_UNUSED(p2); ARG_UNUSED(p3);
+
+    struct relay_tx_job job;
+
+    while (1) {
+        k_msgq_get(&relay_tx_msgq, &job, K_FOREVER);
+
+        uint32_t parent_long_rd_id = dect_net_get_parent_long_rd_id();
+        if (parent_long_rd_id == 0) {
+            LOG_ERR("No parent RD ID, dropping relayed image");
+            uart_rx_release_payload();   /* must always release */
+            continue;
+        }
+
+        /* ── Cumulative delay calculation (moved verbatim from old main_relay_tx) ── */
+        uint8_t route_delays_idx = job.meta.route_delays.num_links;
+
+        if (route_delays_idx >= ROUTING_MAX_HOPS) {
+            LOG_ERR("route_delays_idx %d out of bounds (max %d), dropping frame",
+                    route_delays_idx, ROUTING_MAX_HOPS);
+            uart_rx_release_payload();
+            continue;
+        }
+
+        int32_t current_delay = (route_delays_idx > 0)
+            ? (int32_t)job.meta.route_delays.per_link_delay[route_delays_idx]
+            : 0;
+        uint32_t pt_this_timestamp = k_uptime_get_32();      /* T_C_2 */
+        uint32_t pt_prev_timestamp = job.meta.timestamp_pt;  /* T_A   */
+        int32_t  offset_pt_to_ft   = job.meta.offset_pt_to_ft; /* O_AB */
+        int32_t  cumulative_delay  = current_delay +
+            (pt_this_timestamp - (pt_prev_timestamp + offset_pt_to_ft - sibling_ft_offset));
+
+        LOG_INF("current_delay: %d", current_delay);
+        LOG_INF("pt_this_timestamp: %u", pt_this_timestamp);
+        LOG_INF("pt_prev_timestamp: %u", pt_prev_timestamp);
+        LOG_INF("offset_pt_to_ft: %d", offset_pt_to_ft);
+        LOG_INF("sibling_ft_offset: %d", sibling_ft_offset);
+        LOG_INF("cumulative_delay: %d", cumulative_delay);
+
+        struct hop_delays delay_information = {
+            .num_links = (uint8_t)(route_delays_idx + 1),
+        };
+        for (int i = 0; i < ROUTING_MAX_HOPS; i++) {
+            delay_information.per_link_delay[i]  = job.meta.route_delays.per_link_delay[i];
+            delay_information.devices_visited[i] = job.meta.route_delays.devices_visited[i];
+            delay_information.per_link_rssi[i]   = job.meta.route_delays.per_link_rssi[i];
+        }
+        route_delays_idx++;
+        delay_information.per_link_delay[route_delays_idx]  = cumulative_delay;
+        delay_information.devices_visited[route_delays_idx] = dect_net_get_current_long_rd_id();
+
+        LOG_INF("Relaying image (%u bytes) to parent 0x%08x",
+                job.data_size, parent_long_rd_id);
+
+        /* Blocking DECT TX — safe here, this is a dedicated thread, not the
+         * work queue. tx_img_data() may sleep in its ENOMEM retry loop; that
+         * no longer starves the modem's ACK processing. */
+        tx_img_data(job.data, job.data_size, delay_information,
+                    parent_long_rd_id, job.meta.seq_num);
+
+        /* Done with the payload buffer — let uart.c re-arm the parser. */
+        uart_rx_release_payload();
+    }
 }
 
-static uint32_t get_parent_long_rd_id(void)
+/* Runs in system work queue context (called from uart.c rx_frame_work_handler).
+ * MUST NOT block on anything slow. Just enqueue and return. */
+static void main_relay_tx(const uint8_t *data, uint32_t data_size,
+                          const struct packet_metadata *meta)
 {
-	struct dect_status_info dev_info = {0};
+    struct relay_tx_job job = {
+        .data      = data,
+        .data_size = data_size,
+    };
+    job.meta = *meta;
 
-	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
-	if (ret)
-	{
-		LOG_ERR("Failed to get device status info: %d", ret);
-		return 0;
-	}
-
-	return dev_info.parent_associations->long_rd_id;
+    /* Queue depth is 1 and the payload buffer is held until the TX thread
+     * releases it, so this should normally succeed immediately. A brief block
+     * here only happens if a previous job is still transmitting — which is
+     * correct back-pressure. Bounded wait so the work queue is never stuck
+     * indefinitely. */
+    int ret = k_msgq_put(&relay_tx_msgq, &job, K_MSEC(100));
+    if (ret) {
+        LOG_ERR("Relay TX queue full, dropping image");
+        uart_rx_release_payload();   /* nobody else will release it */
+    }
 }
 
-static uint32_t get_first_child_long_rd_id()
-{
-	struct dect_status_info dev_info = {0};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_STATUS_INFO_GET, dect_iface, &dev_info, sizeof(dev_info));
-	if (ret)
-	{
-		LOG_ERR("Failed to get device status info: %d", ret);
-		return 0;
-	}
-
-	return dev_info.child_associations[0].long_rd_id;
-}
-
-static void create_and_set_device_ipv6(void)
-{
-	// Read settings
-	struct dect_settings dev_settings = {0};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-		return;
-	}
-
-	// Write prefix string to prefix struct
-	net_addr_pton(AF_INET6, MESH_PREFIX_STR, &mesh_prefix);
-
-	// Construct global IPv6 address
-	uint32_t this_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
-	struct in6_addr global_addr;
-	if (!create_ipv6_from_long_rd_id(&global_addr, this_rd_id))
-	{
-		LOG_ERR("Failed to create global IPv6");
-		return;
-	}
-
-	net_if_ipv6_addr_add(dect_iface, &global_addr, NET_ADDR_MANUAL, 0);
-
-	char addr_str[NET_IPV6_ADDR_LEN];
-	net_addr_ntop(AF_INET6, &global_addr, addr_str, sizeof(addr_str));
-
-	LOG_INF("Adding global IPv6: %s", addr_str);
-}
-
-static void write_ft_settings(void)
-{
-	// Read settings
-	struct dect_settings dev_settings = {0};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-		return;
-	}
-
-	// Device type and long rd id
-	dev_settings.device_type = current_device_type;
-	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
-	#endif
-
-	// Network beacon
-	// TODO: Fix from magic numbers
-	dev_settings.nw_beacon.channel = 1657;
-	dev_settings.nw_beacon.beacon_period = DECT_NW_BEACON_PERIOD_1000MS;
-
-	// Write bitmap
-	dev_settings.cmd_params.write_scope_bitmap = 
-		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE 	|
-		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES 	|
-		DECT_SETTINGS_WRITE_SCOPE_NW_BEACON;
-
-	// Write settings
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to write settings: %d", ret);
-		return;
-	}
-
-	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_FT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_SINK_LONG_RD_ID;
-	#endif
-
-	// Create the device IPv6 address
-	create_and_set_device_ipv6();
-
-	LOG_INF("DECT sink FT settings successfully set");
-}
-
-static void write_pt_settings(void)
-{
-	// Read settings
-	struct dect_settings dev_settings = {0};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-		return;
-	}
-
-	// Device type and long RD ID
-	dev_settings.device_type = current_device_type;
-	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
-	#endif
-
-	// Write bitmap
-	dev_settings.cmd_params.write_scope_bitmap = 
-		DECT_SETTINGS_WRITE_SCOPE_DEVICE_TYPE	|
-		DECT_SETTINGS_WRITE_SCOPE_IDENTITIES;
-
-	// Write settings
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to write settings: %d", ret);
-		return;
-	}
-
-	current_long_rd_id = dev_settings.identities.transmitter_long_rd_id;
-
-	// Create the device IPv6 address
-	create_and_set_device_ipv6();
-
-	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-		dev_settings.identities.transmitter_long_rd_id = DECT_PT_LONG_RD_ID;
-	#else
-		dev_settings.identities.transmitter_long_rd_id = DECT_EDGE_PT_LONG_RD_ID;
-	#endif
-	LOG_INF("DECT PT settings successfully set");
-}
-
-static void start_nw_beacon(void)
-{
-	// TODO: Currently hardcoded. Change this to dynamic channel
-	struct dect_nw_beacon_start_req_params nw_beacon_params = {
-		.channel = 1657,
-		.additional_ch_count = 0,
-	};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_NW_BEACON_START, dect_iface, &nw_beacon_params, sizeof(nw_beacon_params)); // Callback to NET_EVENT_DECT_NW_BEACON_START_RESULT
-	if (ret)
-	{
-		LOG_ERR("Network beacon start failed: %d", ret);
-	}
-}
-
-static void start_network_scan(void)
-{
-	best_long_rd_id = 0;
-	best_route_cost = 0xFF;
-
-	struct dect_scan_params scan_params = 
-	{
-		.band = 1,
-		.channel_count = 0,
-		// Maybe add list here
-		.channel_scan_time_ms = 500,
-	};
-
-	int ret = net_mgmt(NET_REQUEST_DECT_SCAN, dect_iface, &scan_params, sizeof(scan_params)); // Callback to NET_EVENT_DECT_SCAN_RESULT and NET_EVENT_DECT_SCAN_DONE
-	if (ret)
-	{
-		LOG_ERR("Failed to start network scan: %d", ret);
-	}
-}
-
-static void join_network(uint32_t long_rd_id)
-{
-	// Write long rd id to settings
-	struct dect_settings dev_settings = {0};
-	int ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_READ, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_ERR("Failed to read settings: %d", ret);
-		return;
-	}
-
-	dev_settings.network_join.target_ft_long_rd_id = best_long_rd_id;
-	dev_settings.cmd_params.write_scope_bitmap |= DECT_SETTINGS_WRITE_SCOPE_NETWORK_JOIN;
-
-	ret = net_mgmt(NET_REQUEST_DECT_SETTINGS_WRITE, dect_iface, &dev_settings, sizeof(dev_settings));
-	if (ret)
-	{
-		LOG_INF("Failed to write settings: %d", ret);
-		return;
-	}
-
-	// Join network
-	ret = net_mgmt(NET_REQUEST_DECT_NETWORK_JOIN, dect_iface, NULL, 0); // Callback to NET_EVENT_DECT_NETWORK_STATUS->Joined
-	if (ret)
-	{
-		LOG_ERR("Network joined failed: %d", ret);
-	}
-}
+#endif /* CONFIG_DECT_RELAY_PT */
 
 static void run_as_ft(void)
 {
@@ -909,16 +754,6 @@ static void run_as_ft(void)
 	LOG_INF("Blocking until association created...");
 	k_sem_take(&sem_association_created, K_FOREVER);
 
-	// Start SYNC rx
-	int success = SYNC_ft_operation();
-	while (success < 0)
-	{
-		success = SYNC_ft_operation();
-		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
-	}
-
-	k_sleep(K_SECONDS(20));	// TODO: Temp, remove this
-
 	ret = uart_data_init();
 	if (ret)
 	{
@@ -929,55 +764,14 @@ static void run_as_ft(void)
 	rx_thread();
 }
 
+/* Is event driven, which is why there is little lines here */
 static void run_as_pt(void)
 {
 	LOG_WRN("Starting as PT");
-
-	start_network_scan();
-
-	LOG_INF("Blocking until network joined...");
-	k_sem_take(&sem_network_joined, K_FOREVER);
-
-	// TODO: Fix stopping here, if devices are not started at the same time
-
-	LOG_INF("Blocking until association created...");
-	k_sem_take(&sem_association_created, K_FOREVER);
-
-	// Start SYNC tx
-	int success = SYNC_pt_operation();
-	while (success < 0)
-	{
-		success = SYNC_pt_operation();
-		k_sleep(K_SECONDS(2)); // Do SYNC operation and sleep retry
-	}
-
-	k_sleep(K_SECONDS(20)); // Temp because SPI thread is buggy
-
-	#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-    uart_rx_set_frame_callback(main_tx_image_message);
-    int ret = uart_data_init();
-    if (ret) {
-        LOG_ERR("Failed to initialize UART RX: %d", ret);
-        return;
-    }
-
-	#elif !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-	// SPI slave start
-	int ret = spi_slave_init();
-	if (ret)
-	{
-		LOG_ERR("Failed to initialize SPI slave: %d", ret);
-		return;
-	}
-	ret = spi_slave_start_thread();
-	if (ret)
-	{
-		LOG_ERR("Failed to start SPI slave thread: %d", ret);
-		return;
-	}
-
-	k_work_schedule(&tx_work, K_SECONDS(5)); // Start transmitting first after 5 seconds
-	#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+    dect_net_start_scan();
+	#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+    k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+	#endif
 }
 
 static void net_conn_mgr_event_handler(struct net_mgmt_event_callback *cb,
@@ -1009,14 +803,15 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		dect_connected = true;
 
 		// Open sockets
-		open_sockets();
+		open_common_socket();
+		sync_open_socket();
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn on LED 1 to indicate connection 
 		dk_set_led_on(DK_LED1);
 #endif
 
-		k_sem_give(&sem_if_up);
+		
 	}
 	else if (mgmt_event == NET_EVENT_IF_DOWN)
 	{
@@ -1025,14 +820,11 @@ static void net_if_event_handler(struct net_mgmt_event_callback *cb,
 		// Update flags and fields
 		dect_connected = false;
 		nw_beacon_started = false;
-		message_counter = 0;
+		message_counter = 0; // TODO: Not used at all?
 
 		// Close sockets
-		close_sockets();
-
-		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
-		k_work_cancel_delayable(&tx_work);
-		#endif /* !CONFIG_DECT_RELAY_PT && !CONFIG_DECT_RELAY_FT */
+		close_common_socket();
+		sync_close_socket();
 
 #if defined(CONFIG_DK_LIBRARY)
 		// Turn off LED 1 to indicate disconnection 
@@ -1047,34 +839,40 @@ static void net_activate_handler(struct net_mgmt_event_callback *cb,
 	// Only handle events for our DECT interface
 	if (iface != dect_iface) return;
 	
-	if (event == NET_EVENT_DECT_ACTIVATE_DONE)
-	{
-		const enum dect_status_values *status = cb->info;
-
-		if(*status == DECT_STATUS_OK)
-		{
-			LOG_INF("DECT stack activated successfully");
-			k_sem_give(&sem_activate);
-		}
-		else
-		{
+	if (event == NET_EVENT_DECT_ACTIVATE_DONE) {
+    const enum dect_status_values *status = cb->info;
+    if (*status == DECT_STATUS_OK) {
+        LOG_INF("DECT stack activated successfully");
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        if (pt_modem_resetting) {
+            pt_modem_resetting = false;
+            LOG_WRN("PT modem reset complete, rescanning");
+            dect_net_start_scan();
+            k_work_schedule(&pt_watchdog_work, K_SECONDS(30));
+            return;
+        }
+        #endif
+        k_sem_give(&sem_activate);
+		} else {
 			LOG_ERR("DECT stack activation failed: %d", *status);
 		}
-	}
-	else if (event == NET_EVENT_DECT_DEACTIVATE_DONE)
-	{
-		const enum dect_status_values *status = cb->info;
-
-		if(*status == DECT_STATUS_OK)
-		{
-			LOG_INF("DECT stack deactivated successfully");
-			k_sem_give(&sem_deactivate);
 		}
-		else
-		{
-			LOG_ERR("DECT stack deactivation failed: %d", *status);
+		else if (event == NET_EVENT_DECT_DEACTIVATE_DONE) {
+			const enum dect_status_values *status = cb->info;
+			if (*status == DECT_STATUS_OK) {
+				#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+				if (pt_modem_resetting) {
+					LOG_WRN("PT modem deactivated, reactivating");
+					net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+					return;
+				}
+				#endif
+				LOG_INF("DECT stack deactivated successfully");
+				k_sem_give(&sem_activate);
+			} else {
+				LOG_ERR("DECT stack deactivation failed: %d", *status);
+			}
 		}
-	}
 }
 
 static void dect_event_handler(struct net_mgmt_event_callback *cb,
@@ -1091,13 +889,12 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 			if (!nw_beacon_started)
 			{
 				nw_beacon_started = true;
-				start_nw_beacon();
+				dect_net_start_beacon();
 			}
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_JOINED)
 		{
 			LOG_INF("Network joined. Safe to start own cluster");
-			k_sem_give(&sem_network_joined);
 		}
 		else if (status->network_status == DECT_NETWORK_STATUS_UNJOINED)
 		{
@@ -1133,45 +930,85 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 
 		break;
 
-    case NET_EVENT_DECT_SCAN_RESULT:
-        const struct dect_scan_result_evt *result = cb->info;
-		const struct dect_route_info *sink_result = &result->route_info;
-		#if IS_ENABLED(CONFIG_DECT_RELAY_PT)
-			// Relay PT must join sink FT directly, ignore relay FT
-			if (result->transmitter_long_rd_id != DECT_SINK_LONG_RD_ID) {
-				LOG_INF("Ignoring non-sink FT 0x%08x", result->transmitter_long_rd_id);
+    case NET_EVENT_DECT_SCAN_RESULT: {
+		const struct dect_scan_result_evt *result = cb->info;
+		const struct dect_route_info *route = &result->route_info;
+
+		// Edge PT: skip the sink, force relay path. TODO: Remove this after testing relays.
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_PT) && !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		/* if (result->transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+			LOG_INF("Edge PT ignoring sink FT 0x%08x (forcing relay)", 
+					result->transmitter_long_rd_id);
+			break;
+		} */
+
+		// Skip if FT is sibling, since that would mean joining our own FT, which would cause a loop (RELAYS)
+		if (sibling_ft_long_rd_id != 0 && result->transmitter_long_rd_id == sibling_ft_long_rd_id) {
+			LOG_INF("Skipping sibling FT 0x%08x", sibling_ft_long_rd_id);
+			break;
+    	}
+		#endif
+
+		// PT cheat: Skip specific FT long RD IDs
+		#if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+		uint32_t this_long_rd_id = dect_net_get_current_long_rd_id();
+		uint32_t transmitter_long_rd_id = result->transmitter_long_rd_id;
+
+		if (this_long_rd_id == 0xAAAAAAAAU) {
+			if (transmitter_long_rd_id == 0xDDDDDDDDU || transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
 				break;
 			}
-		#endif
-		// TODO: When route cost is included, make decision here
-		best_long_rd_id = result->transmitter_long_rd_id;
-		best_route_cost = sink_result->route_cost;
-
-        break;
-
-	case NET_EVENT_DECT_SCAN_DONE:
-		if (best_long_rd_id != 0)
-		{
-			LOG_INF("Scan done. Found RD (long_rd_id=0x%08x) network to join...", best_long_rd_id);
-			join_network(best_long_rd_id);
 		}
-		else
-		{
-			LOG_WRN("No sink FT found. Retrying...");
+		else if (this_long_rd_id == 0xCCCCCCCCU) {
+			if (transmitter_long_rd_id == 0xBBBBBBBBU || transmitter_long_rd_id == DECT_SINK_LONG_RD_ID) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
+				break;
+			}
+		}
+		else if (this_long_rd_id == 0xEEEEEEEEU) {
+			if (transmitter_long_rd_id == 0xBBBBBBBBU || transmitter_long_rd_id == 0xDDDDDDDDU) {
+				LOG_INF("Edge PT ignoring unintended FT device: 0x%08x as 0x%08x",
+				transmitter_long_rd_id, this_long_rd_id);
+				break;
+			}
+		}
+		else {
+			LOG_ERR("current_device_type: %u | long_rd_id: %u", current_device_type, this_long_rd_id);
+			break;
+		}
+		#endif 
+
+		LOG_INF("Scan: FT 0x%08x, route_cost=%d",
+				result->transmitter_long_rd_id, route->route_cost);
+
+		dect_net_consider_ft(result->transmitter_long_rd_id, route->route_cost);
+
+		break;
+	}
+
+	case NET_EVENT_DECT_SCAN_DONE: {
+		if (dect_net_has_best_ft()) {
+			dect_net_join_best();
+		} else {
 			k_msleep(NW_SCAN_RETRY_MS);
-			start_network_scan();
+			dect_net_start_scan();
 		}
         break;
+	}
 
-    case NET_EVENT_DECT_RSSI_SCAN_RESULT:
+    case NET_EVENT_DECT_RSSI_SCAN_RESULT: {
         const struct dect_rssi_scan_result_evt *rssi_result = cb->info;
 		const struct dect_rssi_scan_result_data *data = &rssi_result->rssi_scan_result;
 		LOG_INF("RSSI scan result: channel=%u, rssi=%d",
 				data->channel,
 				data->possible_subslot_cnt);  // Log RSSI if channel is free, otherwise log -128 to indicate busy
         break;
+	}
 
-	case NET_EVENT_DECT_NEIGHBOR_LIST:
+	case NET_EVENT_DECT_NEIGHBOR_LIST: {
 		const struct dect_neighbor_list_evt *neighbor_list = cb->info;
 		LOG_INF("Neighbor list received: %d neighbors found", neighbor_list->neighbor_count);
     
@@ -1182,36 +1019,78 @@ static void dect_event_handler(struct net_mgmt_event_callback *cb,
 					neighbor_list->neighbor_long_rd_ids[i]);
 		}
 		break;
+	}
 
-	case NET_EVENT_DECT_ASSOCIATION_CHANGED:
-		const struct dect_association_changed_evt *evt = cb->info;
+	case NET_EVENT_DECT_ASSOCIATION_CHANGED: {
+    const struct dect_association_changed_evt *evt = cb->info;
 
-		if(evt->association_change_type == DECT_ASSOCIATION_CREATED)
-		{
-			k_sem_give(&sem_association_created);
+    if (evt->association_change_type == DECT_ASSOCIATION_CREATED) {
+        k_sem_give(&sem_association_created);
+        LOG_INF("Association created with RD 0x%08x (role: %s)",
+                evt->long_rd_id,
+                evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child");
 
-			LOG_INF("Association created with RD 0x%08x (role: %s)",
-                    evt->long_rd_id,
-                    evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT ? "parent" : "child"
-			);
-		}
-		else if(evt->association_change_type == DECT_ASSOCIATION_RELEASED ||
-				evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED)
-		{
-			LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
-		}
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_PT)
+        if (evt->neighbor_role == DECT_NEIGHBOR_ROLE_CHILD) {
+            pending_sync_child_id = evt->long_rd_id;
+            k_work_schedule(&ft_sync_work, K_NO_WAIT);
+        }
+        #endif
 
-		break;
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        if (evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT) {
+            k_work_schedule(&pt_post_assoc_work, K_NO_WAIT);
+        }
+        #endif
+    }
+    else if (evt->association_change_type == DECT_ASSOCIATION_RELEASED ||
+             evt->association_change_type == DECT_ASSOCIATION_REQ_REJECTED) {
+        LOG_INF("Association lost with RD 0x%08x", evt->long_rd_id);
 
-    default:
-        LOG_WRN("Unhandled DECT event: 0x%llx", event);
+        #if !IS_ENABLED(CONFIG_DECT_RELAY_FT)
+        if (evt->neighbor_role == DECT_NEIGHBOR_ROLE_PARENT) {
+            LOG_WRN("PT lost parent, reconnecting in 2s");
+            k_work_schedule(&pt_reconnect_work, K_SECONDS(2));
+        }
+        #endif
+    }
+    break;
+}
+	case NET_EVENT_DECT_NEIGHBOR_INFO: {
+        const struct dect_neighbor_info_evt *info = cb->info;
+ 
+        if (info->status != DECT_STATUS_OK) {
+            LOG_WRN("Neighbor info failed for 0x%08x: %d", info->long_rd_id, info->status);
+            break;
+        }
+ 
+        int8_t rssi = info->last_rx_signal_info.rssi_2;
+        dect_net_update_rssi(info->long_rd_id, rssi);
+ 
+        LOG_DBG("RSSI cache update: 0x%08x → %d dBm (SNR %d dB, MCS %u)",
+                info->long_rd_id, rssi,
+                info->last_rx_signal_info.snr,
+                info->last_rx_signal_info.mcs);
         break;
     }
+
+    default: {
+        LOG_WRN("Unhandled DECT event: 0x%llx", event);
+        break;
+	}
+	}
 }
 
 int main(void)
 {
 	int ret;
+
+	// Read reset fields
+	uint32_t reset_reason = NRF_POWER->RESETREAS;
+	LOG_WRN("Reset reason before clearing: 0x%08x", reset_reason);
+	NRF_POWER->RESETREAS = reset_reason;
+	reset_reason = NRF_POWER->RESETREAS;
+	LOG_WRN("Reset register after clearing: 0x%08x", reset_reason);
 
 	LOG_INF("=== Hello DECT NR+ Sample Application ===");
 
@@ -1235,12 +1114,14 @@ int main(void)
 
 	// Setup callbacks for DECT event callbacks
 	net_mgmt_init_event_callback(&dect_event_cb, dect_event_handler,
-		NET_EVENT_DECT_NETWORK_STATUS			|
-		NET_EVENT_DECT_SCAN_RESULT				|
-		NET_EVENT_DECT_SCAN_DONE				|
-		NET_EVENT_DECT_NW_BEACON_START_RESULT	|
-		NET_EVENT_DECT_CLUSTER_CREATED_RESULT	|
-		NET_EVENT_DECT_ASSOCIATION_CHANGED);
+        NET_EVENT_DECT_NETWORK_STATUS           |
+        NET_EVENT_DECT_SCAN_RESULT              |
+        NET_EVENT_DECT_SCAN_DONE                |
+        NET_EVENT_DECT_NW_BEACON_START_RESULT   |
+        NET_EVENT_DECT_CLUSTER_CREATED_RESULT   |
+        NET_EVENT_DECT_ASSOCIATION_CHANGED      |
+        NET_EVENT_DECT_NEIGHBOR_INFO);          
+		
 	net_mgmt_add_event_callback(&dect_event_cb);
 
 	// Get the DECT network interface 
@@ -1269,9 +1150,13 @@ int main(void)
 	LOG_INF("Press button 1 to connect, button 2 to disconnect");
 #endif
 
+	dect_net_init(dect_iface);
+
 	// Write settings
-	if (current_device_type & DECT_DEVICE_TYPE_FT) write_ft_settings();
-	else if(current_device_type & DECT_DEVICE_TYPE_PT) write_pt_settings();
+	if (current_device_type & DECT_DEVICE_TYPE_FT) dect_net_write_ft_settings();
+	else if (current_device_type & DECT_DEVICE_TYPE_PT) dect_net_write_pt_settings();
+
+	sync_init(dect_iface, dect_net_get_mesh_prefix(), DECT_SINK_LONG_RD_ID);
 
 	// Initialize modem library and this triggers DECT NR+ stack initialization
 #if defined(CONFIG_NRF_MODEM_LIB)
@@ -1282,14 +1167,31 @@ int main(void)
 	}
 #endif
 
+	ret = net_mgmt(NET_REQUEST_DECT_ACTIVATE, dect_iface, NULL, 0);
+	if (ret) {
+		LOG_ERR("Failed to activate stack: %d", ret);
+	}
+
 	// Block until DECT is activated
 	LOG_INF("Wait for DECT stack to activate and settings to write...");
 	k_sem_take(&sem_activate, K_FOREVER);
 
 	LOG_INF("Hello DECT application started successfully");
 
-	// --- Sink FT and regular PT specific ---
+	/// --- Sibling FT-PT handshake (only for relay devices) 
+	#if IS_ENABLED(CONFIG_DECT_RELAY_FT) || IS_ENABLED(CONFIG_DECT_RELAY_PT)
+    	uart_handshake_init();
+    	#if IS_ENABLED(CONFIG_DECT_RELAY_FT)
+			uart_handshake_send_id_timestamp(dect_net_get_current_long_rd_id());
 
+			#elif IS_ENABLED(CONFIG_DECT_RELAY_PT)
+        	if (uart_handshake_receive_id_timestamp(&sibling_ft_long_rd_id, &sibling_ft_offset, 30)) {
+            	LOG_ERR("No sibling FT ID received, scanning without filter");
+        	}
+    	#endif
+	#endif
+
+	// --- Sink FT and regular PT specific ---
 	if (current_device_type & DECT_DEVICE_TYPE_FT) // FT
 		run_as_ft();
 	else if (current_device_type & DECT_DEVICE_TYPE_PT) // PT
@@ -1300,5 +1202,3 @@ int main(void)
 
 	return 0;
 }
-
-// TODO: Handle association disconnect

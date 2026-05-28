@@ -14,6 +14,8 @@ PT/
 FT_SINK/
 *PT_EDGE/
 PT_EDGE/
+FT_RELAY/
+*FT_RELAY
 
 # JetBrains
 .idea/
