@@ -4,6 +4,8 @@ Firmware and supporting components for a DECT NR+ multi-hop mesh network that st
 
 This repository contains the Zephyr / nRF Connect SDK application that runs on Nordic Semiconductor **nRF9151-DK** boards. It is the firmware half of a master's thesis project carried out at the University of Agder in cooperation with VIMMS AS (Mandal, Norway).
 
+This project was used together with a different repository https://github.com/Aadlei/DECT-Camera-App which was the evaluation tool we created for the thesis.
+
 ---
 
 ## What the system does
